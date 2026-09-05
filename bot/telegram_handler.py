@@ -312,12 +312,14 @@ class TelegramBot:
     @authorized_only
     @error_handler
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /status — system status."""
+        """Handle /status — system + model-pool status."""
+        from agent.health import status_models
         from storage.models import TaskStatus
 
         pending_tasks = await self.db.get_tasks(status=TaskStatus.PENDING)
         active_reminders = await self.db.get_active_reminders()
         recent_notes = await self.db.get_recent_notes(limit=1)
+        month_bytes = await self.brain.usage.month_prompt_bytes()
 
         now = datetime.now(Config.TIMEZONE)
         status = (
@@ -326,12 +328,29 @@ class TelegramBot:
             f"📌 Pending tasks: {len(pending_tasks)}\n"
             f"⏰ Active reminders: {len(active_reminders)}\n"
             f"📝 Notes stored: {'Yes' if recent_notes else 'None yet'}\n"
-            f"🤖 Fast model: `{Config.FAST_MODEL}`\n"
-            f"🧠 Deep model: `{Config.DEEP_MODEL}`\n"
+            f"🌐 Egress MTD prompt: {month_bytes / 1024:.1f} KB\n"
             f"📰 News at: {Config.NEWS_DELIVERY_HOUR:02d}:{Config.NEWS_DELIVERY_MINUTE:02d}\n"
-            f"📋 Agenda at: {Config.AGENDA_DELIVERY_HOUR:02d}:{Config.AGENDA_DELIVERY_MINUTE:02d}\n"
+            f"📋 Agenda at: {Config.AGENDA_DELIVERY_HOUR:02d}:{Config.AGENDA_DELIVERY_MINUTE:02d}\n\n"
         )
-        await update.message.reply_text(status, parse_mode="Markdown")
+
+        # Per-model lines
+        lines = []
+        for m in await status_models(self.brain.health, self.brain.usage):
+            state = "🟢" if m["state"] == "open" else "🔴"
+            key = "🔑" if m["key_set"] else "🚫"
+            budget = (
+                f" {m['budget_pct']}%RPD" if m["budget_pct"] is not None else ""
+            )
+            rpm = " ⚠️RPM" if m["rpm_full"] else ""
+            lines.append(
+                f"`{m['id']}` {key} {state} "
+                f"[{','.join(m['tiers'])}] P{m['priority']}"
+                f"{budget}{rpm} · {m['today_calls']}c"
+            )
+        status += "**Model pool:**\n" + "\n".join(lines) if lines else "**Model pool:** empty"
+
+        for part in split_long_message(status):
+            await update.message.reply_text(part, parse_mode="Markdown")
 
     # ─── Free-text Handler ────────────────────────────────────────────────
 

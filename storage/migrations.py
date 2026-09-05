@@ -96,7 +96,28 @@ CREATE TABLE IF NOT EXISTS heartbeat (
 );
 """
 
+MIGRATION_3_MODEL_HEALTH = """
+CREATE TABLE IF NOT EXISTS model_health (
+    model_id TEXT PRIMARY KEY,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    cooldown_until TEXT,
+    last_error TEXT,
+    last_success TEXT
+);
+
+CREATE TABLE IF NOT EXISTS model_usage (
+    model_id TEXT NOT NULL,
+    day TEXT NOT NULL,
+    calls INTEGER NOT NULL DEFAULT 0,
+    errors INTEGER NOT NULL DEFAULT 0,
+    prompt_bytes INTEGER NOT NULL DEFAULT 0,
+    output_tokens_est INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (model_id, day)
+);
+"""
+
 MIGRATIONS: list[tuple[int, str]] = [
     (1, MIGRATION_1_BASE_SCHEMA),
     (2, MIGRATION_2_HEARTBEAT),
+    (3, MIGRATION_3_MODEL_HEALTH),
 ]

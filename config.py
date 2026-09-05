@@ -24,11 +24,19 @@ class Config:
     # --- Models ---
     # OpenCode Zen (https://opencode.ai/zen/v1) serves Muse Spark 1.3
     # Contributor Free at no cost via the Responses API.
+    # Since Phase 1 these are NOT read directly by the model layer: they act
+    # as priority-0 overrides injected into the model registry (agent/registry.py).
     FAST_MODEL: str = os.environ.get("FAST_MODEL", "muse-spark-1.3-contributor-free")
     DEEP_MODEL: str = os.environ.get("DEEP_MODEL", "muse-spark-1.3-contributor-free")
     MODEL_API_URL: str = os.environ.get(
         "MODEL_API_URL", "https://opencode.ai/zen/v1"
     )
+
+    # --- Model registry (Phase 1) ---
+    # Optional path to a YAML/JSON file that fully overrides the seeded registry.
+    MODELS_FILE: str | None = os.environ.get("MODELS_FILE") or None
+    # Timeout (seconds) for any single provider request.
+    PROVIDER_TIMEOUT: float = float(os.environ.get("PROVIDER_TIMEOUT", "60"))
 
     # --- Timezone ---
     TIMEZONE_STR: str = os.environ.get("TIMEZONE", "Asia/Jakarta")
