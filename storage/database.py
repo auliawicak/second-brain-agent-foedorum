@@ -9,6 +9,7 @@ from pathlib import Path
 
 import aiosqlite
 
+from storage.migrations import MIGRATIONS
 from storage.models import (
     ConversationEntry,
     Note,
@@ -37,13 +38,13 @@ class Database:
         self._db: aiosqlite.Connection | None = None
 
     async def connect(self) -> None:
-        """Open the database connection and initialize tables."""
+        """Open the database connection and apply pending schema migrations."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db = await aiosqlite.connect(str(self.db_path))
         self._db.row_factory = aiosqlite.Row
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute("PRAGMA foreign_keys=ON")
-        await self._create_tables()
+        await self._apply_migrations()
         logger.info("Database connected: %s", self.db_path)
 
     async def close(self) -> None:
@@ -59,87 +60,40 @@ class Database:
             raise RuntimeError("Database not connected. Call connect() first.")
         return self._db
 
-    # ─── Schema ───────────────────────────────────────────────────────────
+    # ─── Migrations ──────────────────────────────────────────────────────
 
-    async def _create_tables(self) -> None:
-        await self.db.executescript("""
-            CREATE TABLE IF NOT EXISTS tasks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                description TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending',
-                priority TEXT NOT NULL DEFAULT 'medium',
-                due_date TEXT,
-                category TEXT DEFAULT 'general',
-                created_at TEXT NOT NULL,
-                completed_at TEXT,
-                recurring_cron TEXT
-            );
+    async def _apply_migrations(self) -> None:
+        """Apply pending schema migrations in order.
 
-            CREATE TABLE IF NOT EXISTS notes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                content TEXT NOT NULL,
-                tags TEXT DEFAULT '[]',
-                category TEXT DEFAULT 'general',
-                created_at TEXT NOT NULL
-            );
+        Tracks applied migrations in the `schema_version` table. Each
+        migration runs in a transaction; a failure rolls back and is
+        retried (idempotent DDL) on the next startup.
+        """
+        await self.db.execute(
+            "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)"
+        )
+        cursor = await self.db.execute(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version"
+        )
+        row = await cursor.fetchone()
+        current = int(row[0])
 
-            CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
-                content,
-                tags,
-                category,
-                content='notes',
-                content_rowid='id'
-            );
-
-            CREATE TRIGGER IF NOT EXISTS notes_ai AFTER INSERT ON notes BEGIN
-                INSERT INTO notes_fts(rowid, content, tags, category)
-                VALUES (new.id, new.content, new.tags, new.category);
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS notes_ad AFTER DELETE ON notes BEGIN
-                INSERT INTO notes_fts(notes_fts, rowid, content, tags, category)
-                VALUES ('delete', old.id, old.content, old.tags, old.category);
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS notes_au AFTER UPDATE ON notes BEGIN
-                INSERT INTO notes_fts(notes_fts, rowid, content, tags, category)
-                VALUES ('delete', old.id, old.content, old.tags, old.category);
-                INSERT INTO notes_fts(rowid, content, tags, category)
-                VALUES (new.id, new.content, new.tags, new.category);
-            END;
-
-            CREATE TABLE IF NOT EXISTS reminders (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                message TEXT NOT NULL,
-                trigger_time TEXT NOT NULL,
-                is_recurring INTEGER DEFAULT 0,
-                cron_expression TEXT,
-                is_active INTEGER DEFAULT 1,
-                created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS conversations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                timestamp TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS daily_digests (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                date TEXT NOT NULL UNIQUE,
-                raw_content TEXT NOT NULL,
-                delivered_at TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS preferences (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                key TEXT NOT NULL UNIQUE,
-                value TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-        """)
-        await self.db.commit()
+        for version, sql in MIGRATIONS:
+            if version <= current:
+                continue
+            logger.info("Applying schema migration %d...", version)
+            await self.db.execute("BEGIN")
+            try:
+                await self.db.executescript(sql)
+                await self.db.execute(
+                    "INSERT INTO schema_version (version) VALUES (?)", (version,)
+                )
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                logger.exception("Schema migration %d failed", version)
+                raise
+            logger.info("Schema migration %d applied.", version)
 
     # ─── Tasks ────────────────────────────────────────────────────────────
 
@@ -394,3 +348,21 @@ class Database:
         cursor = await self.db.execute("SELECT * FROM preferences ORDER BY created_at")
         rows = await cursor.fetchall()
         return [Preference(**dict(row)) for row in rows]
+
+    # ─── Heartbeat ────────────────────────────────────────────────────────
+
+    async def update_heartbeat(self) -> None:
+        """Stamp the heartbeat row with the current time."""
+        now = datetime.now().isoformat()
+        await self.db.execute(
+            """INSERT INTO heartbeat (id, last_seen) VALUES (1, ?)
+               ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen""",
+            (now,),
+        )
+        await self.db.commit()
+
+    async def get_heartbeat(self) -> str | None:
+        """Return the last heartbeat timestamp, or None if never stamped."""
+        cursor = await self.db.execute("SELECT last_seen FROM heartbeat WHERE id = 1")
+        row = await cursor.fetchone()
+        return row["last_seen"] if row else None

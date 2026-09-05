@@ -57,6 +57,11 @@ class Config:
     NEWS_COUNTRY: str = "us"  # NewsAPI country code
     MAX_NEWS_ARTICLES: int = 10
 
+    # --- Context & limits ---
+    MAX_CONTEXT_MESSAGES: int = int(os.environ.get("MAX_CONTEXT_MESSAGES", "12"))
+    MAX_PREFS_INJECTED: int = int(os.environ.get("MAX_PREFS_INJECTED", "8"))
+    MAX_PROMPT_CHARS: int = int(os.environ.get("MAX_PROMPT_CHARS", "24000"))
+
     @classmethod
     def validate(cls) -> list[str]:
         """Validate that all required configuration is present.

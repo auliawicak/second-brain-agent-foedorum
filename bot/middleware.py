@@ -6,6 +6,7 @@ Restricts access to the authorized user only and provides error handling.
 from __future__ import annotations
 
 import logging
+import traceback
 from functools import wraps
 from typing import Any, Callable, Coroutine
 
@@ -13,6 +14,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from config import Config
+from services.alerts import alert_owner
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +63,10 @@ def error_handler(
             return await func(self, update, context, *args, **kwargs)
         except Exception as e:
             logger.exception("Error in handler '%s': %s", func.__name__, e)
+            await alert_owner(
+                f"⚠️ Handler `{func.__name__}` failed:\n{traceback.format_exc()[-800:]}",
+                dedupe_key=f"handler:{func.__name__}:{str(e)[:60]}",
+            )
             if update and update.message:
                 await update.message.reply_text(
                     "⚠️ Oops, something went wrong processing your request. "

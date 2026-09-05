@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import logging
+import traceback
 from datetime import datetime
+from functools import wraps
+from typing import Any, Awaitable, Callable
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 
 from config import Config
+from services.alerts import alert_owner
 
 logger = logging.getLogger(__name__)
 
@@ -32,9 +36,30 @@ def inject_dependencies(brain, db, send_message_fn) -> None:
     _send_message = send_message_fn
 
 
+def alert_on_error(
+    job_func: Callable[..., Awaitable[Any]],
+) -> Callable[..., Awaitable[Any]]:
+    """Wrap a scheduled job so any uncaught exception alerts the owner."""
+
+    @wraps(job_func)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await job_func(*args, **kwargs)
+        except Exception:
+            logger.exception("Scheduled job '%s' failed", job_func.__name__)
+            await alert_owner(
+                f"⚠️ Scheduled job `{job_func.__name__}` failed:\n"
+                f"{traceback.format_exc()[-1500:]}",
+                dedupe_key=f"job:{job_func.__name__}",
+            )
+
+    return wrapper
+
+
 # ─── Scheduled Jobs ──────────────────────────────────────────────────────────
 
 
+@alert_on_error
 async def morning_news_job() -> None:
     """Fetch, curate, and deliver the morning news digest."""
     logger.info("⏰ Running morning news job...")
@@ -66,6 +91,7 @@ async def morning_news_job() -> None:
         await _send_message("⚠️ Sorry, there was an error preparing today's news digest. I'll check into it.")
 
 
+@alert_on_error
 async def daily_agenda_job() -> None:
     """Send the daily agenda — today's tasks and reminders."""
     logger.info("⏰ Running daily agenda job...")
@@ -101,6 +127,7 @@ async def daily_agenda_job() -> None:
         logger.exception("Failed to deliver daily agenda.")
 
 
+@alert_on_error
 async def reminder_check_job() -> None:
     """Check for due reminders and fire them."""
     try:
@@ -131,6 +158,33 @@ async def reminder_check_job() -> None:
 
     except Exception:
         logger.exception("Error checking reminders.")
+
+
+@alert_on_error
+async def heartbeat_job() -> None:
+    """Stamp the heartbeat table so downtime is measurable on restart."""
+    if _db is None:
+        raise RuntimeError("Database not injected for heartbeat job.")
+    await _db.update_heartbeat()
+
+
+async def check_downtime_on_startup(db) -> None:
+    """Alert the owner if the agent appears to have been down > 2 hours."""
+    last_seen = await db.get_heartbeat()
+    if not last_seen:
+        logger.info("No previous heartbeat — first boot.")
+        return
+
+    try:
+        last = datetime.fromisoformat(last_seen)
+        now = datetime.now()
+        down = now - last
+        if down.total_seconds() > 2 * 3600:
+            hours, remainder = divmod(int(down.total_seconds()), 3600)
+            minutes = remainder // 60
+            await alert_owner(f"⏳ Agent was down for {hours}h {minutes}m.")
+    except Exception:
+        logger.exception("Failed to compute downtime from heartbeat %r", last_seen)
 
 
 def _next_cron_occurrence(cron_expression: str) -> str | None:
@@ -203,6 +257,16 @@ def create_scheduler() -> AsyncIOScheduler:
         minutes=1,
         id="reminder_check",
         name="Reminder Checker",
+        replace_existing=True,
+    )
+
+    # Heartbeat — every 5 minutes
+    scheduler.add_job(
+        heartbeat_job,
+        trigger="interval",
+        minutes=5,
+        id="heartbeat",
+        name="Heartbeat",
         replace_existing=True,
     )
 

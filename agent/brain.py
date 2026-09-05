@@ -17,6 +17,7 @@ import time
 
 from openai import AsyncOpenAI
 
+from agent.context import build_context, build_system_prompt, cap_preferences
 from agent.prompts import MAIN_PERSONA, DEEP_THINKING_PROMPT, NEWS_CURATOR_PROMPT
 from agent.tools import ALL_TOOLS, set_database
 from config import Config
@@ -210,9 +211,10 @@ class SecondBrain:
         # Log the user message
         await self.db.log_conversation("user", message)
 
-        # Load user preferences
+        # Load user preferences (capped at MAX_PREFS_INJECTED)
         preferences = await self.db.get_all_preferences()
-        prefs_str = "\n".join([f"- **{p.key}**: {p.value}" for p in preferences])
+        pref_lines = cap_preferences([f"- **{p.key}**: {p.value}" for p in preferences])
+        prefs_str = "\n".join(pref_lines)
 
         pref_section = ""
         if prefs_str:
@@ -225,12 +227,15 @@ class SecondBrain:
         time_section = f"\n## Current Time\n{now.strftime('%A, %B %d, %Y at %H:%M:%S (UTC+7, Asia/Jakarta)')}\n"
 
         tool_descriptions = self._build_tool_descriptions()
-        system_prompt = MAIN_PERSONA + time_section + pref_section + tool_descriptions
+        system_prompt = build_system_prompt(
+            MAIN_PERSONA,
+            sections=[time_section, pref_section, tool_descriptions],
+        )
 
         # Add user message to history
         self._chat_history.append({"role": "user", "content": message})
 
-        # Keep history manageable (last 20 exchanges)
+        # Keep stored history manageable (last 40 messages)
         if len(self._chat_history) > 40:
             self._chat_history = self._chat_history[-40:]
 
@@ -246,7 +251,7 @@ class SecondBrain:
                 await asyncio.sleep(2)
 
             current_response_text = await self._generate_with_retry(
-                messages=self._chat_history,
+                messages=build_context(self._chat_history, system_prompt),
                 system_instruction=system_prompt,
                 temperature=0.7,
             )

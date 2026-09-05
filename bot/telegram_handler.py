@@ -45,6 +45,9 @@ class TelegramBot:
             .connect_timeout(30.0)
             .read_timeout(30.0)
             .write_timeout(30.0)
+            .get_updates_read_timeout(30)
+            .get_updates_connect_timeout(15)
+            .job_queue(None)  # critical: no second scheduler (APScheduler is in-process)
             .build()
         )
 

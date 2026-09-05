@@ -121,7 +121,10 @@ Type=simple
 WorkingDirectory=/opt/second-brain
 ExecStart=/opt/second-brain/.venv/bin/python -u main.py
 Restart=always
-RestartSec=10
+RestartSec=15
+MemoryHigh=550M
+MemoryMax=750M
+OOMPolicy=stop
 Environment=PYTHONUNBUFFERED=1
 
 [Install]

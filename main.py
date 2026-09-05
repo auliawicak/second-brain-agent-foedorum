@@ -15,6 +15,7 @@ import signal
 import sys
 
 from config import Config
+from services.alerts import alert_owner, shutdown as alerts_shutdown
 
 
 def setup_logging() -> None:
@@ -33,10 +34,35 @@ def setup_logging() -> None:
     logging.getLogger("apscheduler").setLevel(logging.INFO)
 
 
+def install_exception_handler(loop: asyncio.AbstractEventLoop) -> None:
+    """Report unhandled event-loop exceptions to the owner via Telegram."""
+
+    def handler(loop, context):
+        message = context.get("message", "Unhandled exception in event loop")
+        exc = context.get("exception")
+        traceback_text = "".join(
+            context.get("source_traceback", [])
+        ) if "source_traceback" in context else ""
+        logger = logging.getLogger("main")
+        logger.error("Unhandled exception: %s | %s", message, exc, exc_info=exc)
+        body = (
+            f"⚡ Unhandled exception:\n{message}\n\n"
+            f"{exc or ''}\n{traceback_text}"
+        )[:3000]
+        asyncio.create_task(
+            alert_owner(body, dedupe_key=f"loop:{message}")
+        )
+
+    loop.set_exception_handler(handler)
+
+
 async def main() -> None:
     """Main async entry point — starts all services and runs the bot."""
     setup_logging()
     logger = logging.getLogger("main")
+
+    loop = asyncio.get_running_loop()
+    install_exception_handler(loop)
 
     # ── Validate Config ───────────────────────────────────────────────────
     errors = Config.validate()
@@ -59,25 +85,26 @@ async def main() -> None:
     await db.connect()
     logger.info("✅ Database ready: %s", Config.DATABASE_PATH)
 
-    # ── Initialize AI Agents ──────────────────────────────────────────────
+    # ── Agent, bot, scheduler ──────────────────────────────────────────────
     from agent.brain import SecondBrain
 
     brain = SecondBrain(db)
     await brain.start()
     logger.info("✅ AI Agents ready (fast: %s, deep: %s)", Config.FAST_MODEL, Config.DEEP_MODEL)
 
-    # ── Initialize Telegram Bot ───────────────────────────────────────────
     from bot.telegram_handler import TelegramBot
 
     telegram_bot = TelegramBot(brain, db)
     app = telegram_bot.build()
     logger.info("✅ Telegram bot built.")
 
-    # ── Initialize Scheduler ──────────────────────────────────────────────
-    from services.scheduler import create_scheduler, inject_dependencies
+    from services.scheduler import create_scheduler, inject_dependencies, check_downtime_on_startup
 
     inject_dependencies(brain, db, telegram_bot.send_message)
     scheduler = create_scheduler()
+
+    # Downtime alert (uses direct db handle; safe before injection timing)
+    await check_downtime_on_startup(db)
     logger.info("✅ Scheduler configured.")
 
     # ── Start Everything ──────────────────────────────────────────────────
@@ -147,6 +174,12 @@ async def main() -> None:
         try:
             await db.close()
             logger.info("Database closed.")
+        except Exception:
+            pass
+
+        try:
+            await alerts_shutdown()
+            logger.info("Alert client closed.")
         except Exception:
             pass
 
