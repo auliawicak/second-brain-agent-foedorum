@@ -1,0 +1,284 @@
+"""Custom tools exposed to the AI agent for database and service access."""
+
+from __future__ import annotations
+
+import json
+import logging
+from datetime import datetime
+
+from storage.database import Database
+from storage.models import NoteCreate, PreferenceCreate, ReminderCreate, TaskCreate, TaskPriority, TaskStatus
+
+logger = logging.getLogger(__name__)
+
+# The database instance is injected at startup via set_database()
+_db: Database | None = None
+
+
+def set_database(database: Database) -> None:
+    """Inject the database instance for tools to use."""
+    global _db
+    _db = database
+
+
+def _get_db() -> Database:
+    if _db is None:
+        raise RuntimeError("Database not initialized. Call set_database() first.")
+    return _db
+
+
+# ─── Task Tools ───────────────────────────────────────────────────────────────
+
+
+async def add_task(
+    description: str,
+    priority: str = "medium",
+    due_date: str | None = None,
+    category: str = "general",
+) -> str:
+    """Create a new task in the user's task list.
+
+    Args:
+        description: What needs to be done.
+        priority: Priority level — one of 'low', 'medium', 'high', 'urgent'.
+        due_date: Optional due date in YYYY-MM-DD format.
+        category: Category like 'work', 'personal', 'health', 'learning'.
+    """
+    db = _get_db()
+    task_data = TaskCreate(
+        description=description,
+        priority=TaskPriority(priority),
+        due_date=due_date,
+        category=category,
+    )
+    task = await db.add_task(task_data)
+    return f"✅ Task #{task.id} created: {task.description} [{task.priority.value}]"
+
+
+async def list_tasks(
+    status: str = "pending",
+    category: str | None = None,
+    date: str | None = None,
+) -> str:
+    """List tasks with optional filters.
+
+    Args:
+        status: Filter by status — 'pending', 'in_progress', 'done', 'archived'. Use 'all' for no filter.
+        category: Optional category filter like 'work', 'personal'.
+        date: Optional date filter in YYYY-MM-DD format.
+    """
+    db = _get_db()
+    task_status = TaskStatus(status) if status != "all" else None
+    tasks = await db.get_tasks(status=task_status, date=date, category=category)
+
+    if not tasks:
+        return "No tasks found matching the criteria."
+
+    lines = []
+    for t in tasks:
+        status_icon = {"pending": "⬜", "in_progress": "🔄", "done": "✅", "archived": "📦"}.get(
+            t.status.value, "❓"
+        )
+        priority_icon = {"urgent": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(
+            t.priority.value, ""
+        )
+        due = f" (due: {t.due_date})" if t.due_date else ""
+        lines.append(f"{status_icon} #{t.id} {priority_icon} {t.description}{due} [{t.category}]")
+
+    return "\n".join(lines)
+
+
+async def complete_task(task_id: int) -> str:
+    """Mark a task as completed.
+
+    Args:
+        task_id: The numeric ID of the task to complete.
+    """
+    db = _get_db()
+    task = await db.complete_task(int(task_id))
+    if task:
+        return f"✅ Task #{task.id} completed: {task.description}"
+    return f"❌ Task #{task_id} not found."
+
+
+async def get_today_agenda() -> str:
+    """Get today's agenda: pending tasks, due items, and active reminders."""
+    db = _get_db()
+    today = datetime.now().strftime("%Y-%m-%d")
+    tasks = await db.get_today_tasks(today)
+    reminders = await db.get_active_reminders()
+
+    lines = [f"📅 **Agenda for {today}**\n"]
+
+    if tasks:
+        lines.append("**Tasks:**")
+        for t in tasks:
+            priority_icon = {"urgent": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(
+                t.priority.value, ""
+            )
+            due = f" (due: {t.due_date})" if t.due_date else " (no due date)"
+            lines.append(f"  {priority_icon} #{t.id} {t.description}{due}")
+    else:
+        lines.append("**Tasks:** No pending tasks! 🎉")
+
+    if reminders:
+        lines.append("\n**Reminders:**")
+        for r in reminders:
+            lines.append(f"  ⏰ {r.message} — {r.trigger_time}")
+    else:
+        lines.append("\n**Reminders:** None active.")
+
+    return "\n".join(lines)
+
+
+# ─── Note Tools ───────────────────────────────────────────────────────────────
+
+
+async def save_note(
+    content: str,
+    tags: str = "[]",
+    category: str = "general",
+) -> str:
+    """Save a note, idea, or piece of information to the user's second brain.
+
+    Args:
+        content: The note content to save.
+        tags: JSON array of tags, e.g. '["idea", "project-x"]'.
+        category: Category like 'work', 'personal', 'research', 'idea'.
+    """
+    db = _get_db()
+    parsed_tags = json.loads(tags) if isinstance(tags, str) else tags
+    note_data = NoteCreate(content=content, tags=parsed_tags, category=category)
+    note = await db.add_note(note_data)
+    tag_str = ", ".join(f"#{t}" for t in note.tags) if note.tags else ""
+    return f"📝 Note #{note.id} saved.{' Tags: ' + tag_str if tag_str else ''}"
+
+
+async def search_notes(query: str) -> str:
+    """Search through saved notes using full-text search.
+
+    Args:
+        query: The search query to find relevant notes.
+    """
+    db = _get_db()
+    notes = await db.search_notes(query)
+
+    if not notes:
+        return f"No notes found matching '{query}'."
+
+    lines = [f"🔍 Found {len(notes)} note(s) for '{query}':\n"]
+    for n in notes:
+        tag_str = " ".join(f"#{t}" for t in n.tags) if n.tags else ""
+        lines.append(f"📝 #{n.id} ({n.created_at[:10]}): {n.content[:200]}{'...' if len(n.content) > 200 else ''}")
+        if tag_str:
+            lines.append(f"   Tags: {tag_str}")
+    return "\n".join(lines)
+
+
+async def get_recent_notes(limit: int = 10) -> str:
+    """Get the most recent saved notes.
+
+    Args:
+        limit: Maximum number of notes to return (default 10).
+    """
+    db = _get_db()
+    notes = await db.get_recent_notes(int(limit))
+
+    if not notes:
+        return "No notes saved yet."
+
+    lines = ["📒 **Recent Notes:**\n"]
+    for n in notes:
+        tag_str = " ".join(f"#{t}" for t in n.tags) if n.tags else ""
+        lines.append(f"📝 #{n.id} ({n.created_at[:10]}): {n.content[:150]}{'...' if len(n.content) > 150 else ''}")
+        if tag_str:
+            lines.append(f"   Tags: {tag_str}")
+    return "\n".join(lines)
+
+
+# ─── Reminder Tools ──────────────────────────────────────────────────────────
+
+
+async def set_reminder(
+    message: str,
+    trigger_time: str,
+    is_recurring: bool = False,
+    cron_expression: str | None = None,
+) -> str:
+    """Set a reminder that will be sent at a specific time.
+
+    Args:
+        message: The reminder message to send.
+        trigger_time: When to trigger, in ISO datetime format (YYYY-MM-DDTHH:MM:SS).
+        is_recurring: Whether this reminder repeats.
+        cron_expression: Cron expression for recurring reminders (e.g. '0 9 * * 1-5').
+    """
+    db = _get_db()
+    reminder_data = ReminderCreate(
+        message=message,
+        trigger_time=trigger_time,
+        is_recurring=is_recurring,
+        cron_expression=cron_expression,
+    )
+    reminder = await db.add_reminder(reminder_data)
+    recur_text = f" (recurring: {cron_expression})" if is_recurring else ""
+    return f"⏰ Reminder #{reminder.id} set for {trigger_time}{recur_text}: {message}"
+
+
+# ─── Utility Tools ────────────────────────────────────────────────────────────
+
+
+def get_current_datetime() -> str:
+    """Get the current date and time in the user's timezone (Asia/Jakarta, UTC+7).
+
+    Returns the current date, time, and day of week.
+    """
+    from zoneinfo import ZoneInfo
+
+    now = datetime.now(ZoneInfo("Asia/Jakarta"))
+    return now.strftime("Current date/time: %A, %B %d, %Y at %H:%M:%S (UTC+7)")
+
+
+async def save_preference(key: str, value: str) -> str:
+    """Save a user habit, preference, or fact so you remember it in the future.
+
+    Args:
+        key: A short identifier for the preference (e.g. 'morning_drink', 'workout_time', 'diet').
+        value: The actual detail (e.g. 'Prefers black coffee', 'Works out at 6am', 'Vegan').
+    """
+    db = _get_db()
+    pref_data = PreferenceCreate(key=key, value=value)
+    await db.save_preference(pref_data)
+    return f"🧠 Learned and saved preference: {key} = {value}"
+
+
+async def get_news() -> str:
+    """Fetch and curate the latest top news stories.
+
+    Returns a curated digest of the most important recent news.
+    """
+    from services.news import fetch_all_news
+
+    raw_articles = await fetch_all_news()
+    if "No news articles available" in raw_articles:
+        return "No news available right now."
+
+    return f"Here are the raw latest news articles. Please curate them for the user:\n\n{raw_articles}"
+
+
+# ─── Tool Registry ───────────────────────────────────────────────────────────
+
+
+ALL_TOOLS = [
+    add_task,
+    list_tasks,
+    complete_task,
+    get_today_agenda,
+    save_note,
+    search_notes,
+    get_recent_notes,
+    set_reminder,
+    get_current_datetime,
+    save_preference,
+    get_news,
+]

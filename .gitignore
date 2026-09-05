@@ -1,0 +1,29 @@
+# Second Brain Agent
+
+# Secrets — never commit
+.env
+
+# Runtime data — never commit
+data/*.db
+data/*.sqlite
+data/*.db-shm
+data/*.db-wal
+data/agent_state/
+
+# Logs & runtime artifacts
+bot.log
+bot_output.log
+bot_pid.txt
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.venv/
+dist/
+build/
+
+# OS
+.DS_Store

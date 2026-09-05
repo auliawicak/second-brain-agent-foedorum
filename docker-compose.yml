@@ -1,0 +1,17 @@
+version: "3.8"
+
+services:
+  second-brain:
+    build: .
+    container_name: second-brain-agent
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Persist database and agent state across restarts
+      - ./data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
