@@ -34,6 +34,16 @@ FALLBACK_MESSAGE = (
     "⚠️ All my AI backends are temporarily unavailable. Please try again in a few minutes."
 )
 
+TOOL_POLICY = """
+## Tool Use Policy
+- If the user asks you to DO something a tool can do (add a task, list tasks, complete a task, save/search/recent notes, set a reminder, get the current date/time, remember a preference, get the news), your FIRST reply MUST be exactly the tool call as a JSON block:
+```json {"tool": "tool_name", "args": {"param": "value"}}
+```
+- Do not describe or acknowledge in prose first — just the JSON block.
+- For pure questions that need no action, answer normally in prose.
+- After you receive a "Tool result:" message, reply to the user in short prose summarizing the outcome.
+"""
+
 
 def _estimate_output_tokens(result) -> int:
     """Estimate output token count from provider usage when present."""
@@ -179,7 +189,7 @@ class SecondBrain:
         tool_descriptions = self._build_tool_descriptions()
         system_prompt = build_system_prompt(
             MAIN_PERSONA,
-            sections=[time_section, pref_section, tool_descriptions],
+            sections=[time_section, pref_section, tool_descriptions + TOOL_POLICY],
         )
 
         self._chat_history.append({"role": "user", "content": message})
@@ -201,7 +211,7 @@ class SecondBrain:
                 tier=TIER_MAP["chat"],
                 messages=build_context(self._chat_history, system_prompt),
                 system_instruction=system_prompt,
-                temperature=0.7,
+                temperature=0.3,
             )
 
             parsed = parse_tool_call(current_response_text)

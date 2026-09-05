@@ -43,3 +43,18 @@ class TestParseToolCall:
         name, args = parse_tool_call(text)
         assert name == "complete_task"
         assert args["task_id"] == 3
+
+    def test_inline_fence_tool(self) -> None:
+        """Model sometimes emits ```json {…} ``` on one line (no newlines)."""
+        text = (
+            'Here you go: ```json {"tool": "save_note", '
+            '"args": {"content": "buy milk"}} ``` all set'
+        )
+        name, args = parse_tool_call(text)
+        assert name == "save_note"
+        assert args["content"] == "buy milk"
+
+    def test_prose_then_json(self) -> None:
+        text = 'No problem! {"tool": "get_news", "args": {}} Done.'
+        name, args = parse_tool_call(text)
+        assert name == "get_news"

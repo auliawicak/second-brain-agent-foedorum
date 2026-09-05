@@ -17,31 +17,31 @@ logger = logging.getLogger(__name__)
 
 def _extract_raw_json(text: str) -> str | None:
     """Strip fences + prose and return the first complete JSON object/array."""
-    # Pattern 1: fenced code block.
-    fence = re.search(
-        r"```(?:json)?\s*\n(.*?)\n\s*```", text, re.DOTALL
-    )
+    # Pattern 1: fenced code block (```json on its own line).
+    fence = re.search(r"```(?:json)?\s*\n(.*?)\n\s*```", text, re.DOTALL)
     if fence:
         return fence.group(1).strip()
 
-    # Pattern 2: bare JSON object starting with {"tool" ...
-    bare = re.search(r"(\{\s*\"tool\"\s*:.*)", text, re.DOTALL)
-    if bare:
-        return bare.group(1).strip()
-
-    # Pattern 3: any leading "{..." or "[...".
-    for open_char, close_char in (("{", "}"), ("[", "]")):
-        idx = text.find(open_char)
-        if idx == -1:
-            continue
-        depth = 0
-        for i in range(idx, len(text)):
-            if text[i] == open_char:
-                depth += 1
-            elif text[i] == close_char:
-                depth -= 1
-                if depth == 0:
-                    return text[idx : i + 1].strip()
+    # General case: find the first { or [, walk balanced braces, and return
+    # that slice. Handles inline fences (```json {"tool":…}``` on one line),
+    # prose-then-JSON, and trailing commentary after the object.
+    idx = -1
+    for i, ch in enumerate(text):
+        if ch in "{[":     # also catch `"{"` inside code-fence-on-same-line
+            idx = i
+            break
+    if idx == -1:
+        return None
+    open_ch = text[idx]
+    close_ch = "}" if open_ch == "{" else "]"
+    depth = 0
+    for i in range(idx, len(text)):
+        if text[i] == open_ch:
+            depth += 1
+        elif text[i] == close_ch:
+            depth -= 1
+            if depth == 0:
+                return text[idx : i + 1].strip()
     return None
 
 
