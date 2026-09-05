@@ -17,12 +17,27 @@ English + Indonesian, covering: `add_task`, `set_reminder`, `list_tasks`,
 
 ## Results
 
-| Date | Model | Provider | Score | GA? |
-|------|-------|----------|-------|-----|
-| 2026-09-05 | muse-spark-1.3-contributor-free | zen | **29/30 (97%)** | yes |
-| _pending_ | big-pickle | zen | — | — |
-| _pending_ | gemini-2.5-flash | google | — | — |
-| _pending_ | llama-3.3-70b-versatile | groq | — | — |
+| Date | Model | Provider | Score | GA? | Notes |
+|------|-------|----------|-------|-----|-------|
+| 2026-09-05 | muse-spark-1.3-contributor-free | zen | **29/30 (97%)** | yes | sole `tools`-tier model |
+| 2026-09-06 | big-pickle | zen | — | no | HTTP 401 "Model is disabled" (not on this account/plan) |
+| 2026-09-06 | mimo-v2.5-free | zen | 0/30 (0%) | no | never emits a tool call; heavy free-tier rate limiting |
+| 2026-09-06 | ling-3.0-flash-fin-free | zen | 14/30 (47%) | no | mostly prose instead of a JSON tool block |
+| 2026-09-06 | nemotron-3-ultra-free | zen | — | no | upstream consistently 502 "Service temporarily overloaded" |
+| 2026-09-06 | nemotron-3.5-lightning-free | zen | 23/30 (77%) | no | misses reminders/news + frequent timeouts (`__error__`) |
+| _pending_ | big-pickle (retest) | zen | — | — | only if it becomes enabled on this plan |
+| _pending_ | gemini-2.5-flash | google | — | — | needs GEMINI_API_KEY |
+| _pending_ | llama-3.3-70b-versatile | groq | — | — | needs GROQ_API_KEY |
+
+### Acceptance status
+
+Every free model currently available on OpenCode Zen has been tested. Only
+**muse** meets the >= 90% GA bar, so the `tools` tier runs on muse alone while
+mimo/ling/lightning serve as `chat`/`classify` fallbacks. The >= 3 **providers**
+GA criterion is **not yet satisfied**: all zen models share one provider key,
+and per owner decision no other provider is being onboarded for now. The
+criterion can be satisfied later by adding GEMINI_API_KEY / GROQ_API_KEY (2
+more providers) — the golden harness and failover path are ready for them.
 
 ## Static registry snapshot (compiled Sept 2026)
 
