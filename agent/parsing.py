@@ -89,3 +89,22 @@ def parse_tool_call(response_text: str) -> tuple[str, dict] | None:
             args = {}
         return str(name), args
     return None
+
+
+def extract_json_object(text: str) -> dict | None:
+    """Return the first complete JSON object in `text`, or None.
+
+    Tolerant of fences/prose and of the usual repair targets. Used by the
+    correction classifier and other small structured replies.
+    """
+    raw = _extract_raw_json(text)
+    if not raw:
+        return None
+    for candidate in (raw, _repair(raw)):
+        try:
+            obj = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            return obj
+    return None

@@ -116,8 +116,34 @@ CREATE TABLE IF NOT EXISTS model_usage (
 );
 """
 
+MIGRATION_4_FEEDBACK = """
+CREATE TABLE IF NOT EXISTS corrections (
+    id INTEGER PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    trigger TEXT NOT NULL,            -- 'explicit' | 'edit' | 'thumbs_down'
+    user_message TEXT,                -- what the user said
+    agent_action TEXT,                -- what the agent did (tool + args, or reply excerpt)
+    correction TEXT,                  -- what the user wanted instead
+    consolidated INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS feedback (
+    id INTEGER PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    message_ref TEXT NOT NULL,
+    rating INTEGER NOT NULL,          -- +1 | -1
+    model_id TEXT,
+    tier TEXT,
+    note TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_corrections_created ON corrections(created_at);
+CREATE INDEX IF NOT EXISTS idx_feedback_created ON feedback(created_at);
+"""
+
 MIGRATIONS: list[tuple[int, str]] = [
     (1, MIGRATION_1_BASE_SCHEMA),
     (2, MIGRATION_2_HEARTBEAT),
     (3, MIGRATION_3_MODEL_HEALTH),
+    (4, MIGRATION_4_FEEDBACK),
 ]

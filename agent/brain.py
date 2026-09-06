@@ -10,10 +10,15 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+from dataclasses import dataclass
 
 from agent.context import build_context, build_system_prompt, cap_preferences
 from agent.health import ModelHealth, UsageTracker
-from agent.parsing import looks_like_tool_response, parse_tool_call
+from agent.parsing import (
+    extract_json_object,
+    looks_like_tool_response,
+    parse_tool_call,
+)
 from agent.providers import (
     ProviderError,
     call_model,
@@ -33,6 +38,30 @@ MAX_PER_MODEL_RETRIES = 2        # per candidate, ~3s/6s backoff
 FALLBACK_MESSAGE = (
     "⚠️ All my AI backends are temporarily unavailable. Please try again in a few minutes."
 )
+
+
+@dataclass
+class ChatResult:
+    """Result of a chat() turn, with the metadata Phase 2 feedback needs."""
+
+    text: str
+    tool: str | None = None
+    tool_args: dict | None = None
+    tool_result: str | None = None
+    model_id: str | None = None
+    tier: str = "chat"
+
+    @property
+    def executed_tool(self) -> bool:
+        return self.tool is not None
+
+    @property
+    def agent_action(self) -> str | None:
+        """What the agent did — tool + args (or a reply excerpt)."""
+        if not self.tool:
+            return (self.text or "")[:200] or None
+        args = self.tool_args or {}
+        return f"{self.tool}{args}-> {self.tool_result}".strip()
 
 TOOL_POLICY = """
 ## Tool Use Policy
@@ -62,6 +91,8 @@ class SecondBrain:
     def __init__(self, db: Database) -> None:
         self.db = db
         self._chat_history: list[dict] = []
+        self._last_model = ("", "")
+        self.last_chat: ChatResult | None = None
 
         set_database(db)
         self.health = ModelHealth(db)
@@ -116,6 +147,7 @@ class SecondBrain:
                         cand.id, prompt_bytes, est_out
                     )
                     await self.health.record_success(cand.id)
+                    self._last_model = (cand.id, tier)
                     return result.text
                 except ProviderError as e:
                     last_error = e
@@ -169,8 +201,12 @@ class SecondBrain:
             logger.error("Tool execution error for %s: %s", tool_name, e)
             return f"Error executing tool '{tool_name}': {e}"
 
-    async def chat(self, message: str) -> str:
-        """Send a message through the tool loop (tools tier)."""
+    async def chat(self, message: str) -> ChatResult:
+        """Send a message through the tool loop (tools tier).
+
+        Returns a ChatResult carrying the final text plus feedback metadata
+        (executed tool, serving model, tier) for Phase 2.
+        """
         await self.db.log_conversation("user", message)
 
         preferences = await self.db.get_all_preferences()
@@ -200,6 +236,9 @@ class SecondBrain:
         iteration = 0
         response_text = ""
         strict_retried = False
+        last_tool: str | None = None
+        last_tool_args: dict | None = None
+        last_tool_result: str | None = None
 
         while iteration < max_iterations:
             iteration += 1
@@ -233,6 +272,9 @@ class SecondBrain:
             if parsed:
                 tool_name, args = parsed
                 tool_result = await self._execute_tool(tool_name, args)
+                last_tool = tool_name
+                last_tool_args = args
+                last_tool_result = tool_result
 
             if tool_result:
                 self._chat_history.append({"role": "assistant", "content": current_response_text})
@@ -246,7 +288,17 @@ class SecondBrain:
 
         self._chat_history.append({"role": "assistant", "content": response_text})
         await self.db.log_conversation("assistant", response_text)
-        return response_text
+
+        model_id, model_tier = self._last_model
+        self.last_chat = ChatResult(
+            text=response_text,
+            tool=last_tool,
+            tool_args=last_tool_args,
+            tool_result=last_tool_result,
+            model_id=model_id or None,
+            tier=model_tier or "chat",
+        )
+        return self.last_chat
 
     async def think(self, message: str) -> str:
         """Deep reasoning via the `deep` tier (not part of chat history)."""
@@ -294,3 +346,41 @@ class SecondBrain:
             temperature=0.2,
             max_tokens=32,
         )
+
+    async def classify_correction(
+        self, user_message: str, agent_action: str | None
+    ) -> dict | None:
+        """Explicit-correction classifier (Phase 2 §2.1).
+
+        Lightweight `classify`-tier call answering
+        `{"is_correction": bool, "what_was_wrong": str}`. Only ever invoked
+        when the previous agent turn contained a tool call. Returns the parsed
+        JSON object, or None when the message was not a correction / undecided.
+        """
+        prompt = (
+            "A user message follows an assistant action. Decide whether the user is "
+            "correcting the assistant about what it just did (wrong task, wrong details, "
+            "missing info, right intent but you did the wrong thing). Pure questions and "
+            "follow-through instructions like 'thanks' or 'also add milk' are NOT corrections. "
+            "Reply with a single JSON object:\n"
+            '{"is_correction": true|false, "what_was_wrong": "one sentence"}\n\n'
+            f'Assistant action: {agent_action or "(none)"}\n\n'
+            f'User message: {user_message[:500]}'
+        )
+        text = await self._generate(
+            tier=TIER_MAP["classify"],
+            messages=[{"role": "user", "content": prompt}],
+            system_instruction="Return only valid JSON, no prose, no code fences.",
+            temperature=0.1,
+            max_tokens=80,
+        )
+        obj = extract_json_object(text)
+        if not obj or not isinstance(obj.get("is_correction"), bool):
+            return None
+        if obj["is_correction"]:
+            return {
+                "is_correction": True,
+                "what_was_wrong": str(obj.get("what_was_wrong") or "").strip()
+                or "(no detail)",
+            }
+        return {"is_correction": False, "what_was_wrong": None}

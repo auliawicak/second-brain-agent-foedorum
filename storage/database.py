@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import aiosqlite
@@ -366,3 +366,66 @@ class Database:
         cursor = await self.db.execute("SELECT last_seen FROM heartbeat WHERE id = 1")
         row = await cursor.fetchone()
         return row["last_seen"] if row else None
+
+    # ─── Feedback & corrections (Phase 2) ─────────────────────────────────
+
+    async def add_correction(
+        self,
+        trigger: str,
+        user_message: str | None = None,
+        agent_action: str | None = None,
+        correction: str | None = None,
+    ) -> int:
+        """Record a user correction (explicit / edit / thumbs_down)."""
+        now = datetime.now().isoformat()
+        cursor = await self.db.execute(
+            """INSERT INTO corrections (created_at, trigger, user_message, agent_action, correction, consolidated)
+               VALUES (?, ?, ?, ?, ?, 0)""",
+            (now, trigger, user_message, agent_action, correction),
+        )
+        await self.db.commit()
+        return cursor.lastrowid
+
+    async def add_feedback(
+        self,
+        message_ref: str,
+        rating: int,
+        model_id: str | None = None,
+        tier: str | None = None,
+        note: str | None = None,
+    ) -> int:
+        """Record a 👍 (+1) / 👎 (-1) rating on an agent reply."""
+        now = datetime.now().isoformat()
+        cursor = await self.db.execute(
+            """INSERT INTO feedback (created_at, message_ref, rating, model_id, tier, note)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (now, message_ref, rating, model_id, tier, note),
+        )
+        await self.db.commit()
+        return cursor.lastrowid
+
+    async def get_feedback_counts(self, days: int = 7) -> tuple[int, int]:
+        """Return (thumbs_up, thumbs_down) counts for the last `days` days."""
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        cursor = await self.db.execute(
+            """SELECT rating, COUNT(*) FROM feedback
+               WHERE created_at >= ? GROUP BY rating""",
+            (cutoff,),
+        )
+        rows = await cursor.fetchall()
+        ups = downs = 0
+        for row in rows:
+            if int(row[0]) > 0:
+                ups += int(row[1])
+            else:
+                downs += int(row[1])
+        return ups, downs
+
+    async def get_correction_counts(self, days: int = 7) -> int:
+        """Return the number of corrections recorded in the last `days` days."""
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        cursor = await self.db.execute(
+            "SELECT COUNT(*) FROM corrections WHERE created_at >= ?", (cutoff,)
+        )
+        row = await cursor.fetchone()
+        return int(row[0]) if row else 0
