@@ -391,6 +391,14 @@ class Database:
         rows = await cursor.fetchall()
         return [Reminder(**dict(row)) for row in rows]
 
+    async def get_all_reminders(self) -> list[Reminder]:
+        """Get every reminder row (active and inactive), oldest trigger first."""
+        cursor = await self.db.execute(
+            "SELECT * FROM reminders ORDER BY trigger_time"
+        )
+        rows = await cursor.fetchall()
+        return [Reminder(**dict(row)) for row in rows]
+
     # ─── Conversations ────────────────────────────────────────────────────
 
     async def log_conversation(self, role: str, content: str) -> None:

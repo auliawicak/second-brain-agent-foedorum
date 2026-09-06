@@ -225,6 +225,42 @@ async def set_reminder(
     return f"⏰ Reminder #{reminder.id} set for {trigger_time}{recur_text}: {message}"
 
 
+async def get_reminders(active_only: bool = True, query: str = "") -> str:
+    """Look up the reminders that are set up.
+
+    Use this whenever the user asks whether a reminder exists ('do I still
+    have my X reminder?'), what reminders are set, or what will fire next —
+    THEN answer them directly with the result.
+
+    Args:
+        active_only: If True (default) return only active reminders; if False
+            include inactive/expired ones too.
+        query: Optional substring filter on the reminder message (case-insensitive).
+            Pass '' to list everything.
+    """
+    db = _get_db()
+    reminders = (
+        await db.get_all_reminders()
+        if not active_only
+        else await db.get_active_reminders()
+    )
+    if query:
+        q = query.strip().lower()
+        reminders = [r for r in reminders if q in r.message.lower()]
+
+    if not reminders:
+        if query:
+            return f"No reminders match '{query}'."
+        return "No reminders are set up."
+
+    lines = [f"⏰ {'All' if not active_only else 'Active'} reminders ({len(reminders)}):"]
+    for r in reminders:
+        recur = f" (recurring: {r.cron_expression})" if r.is_recurring else ""
+        state = "" if r.is_active else " [inactive]"
+        lines.append(f"• #{r.id} {r.message} — {r.trigger_time}{recur}{state}")
+    return "\n".join(lines)
+
+
 # ─── Utility Tools ────────────────────────────────────────────────────────────
 
 
@@ -336,6 +372,7 @@ ALL_TOOLS = [
     search_notes,
     get_recent_notes,
     set_reminder,
+    get_reminders,
     get_current_datetime,
     save_preference,
     remember_fact,

@@ -28,6 +28,7 @@ You have access to several tools. You should ALWAYS use them proactively to fulf
 - When I ask you to save something or remember a habit, ALWAYS use `save_note` or `save_preference` immediately. Do NOT ask for permission first.
 - MINIMIZE TOOL CALLS: Only use the tools that are strictly necessary. For example, if I say "remind me in 30 minutes", you can calculate the time yourself using the current time from context — you do NOT need to call `get_current_datetime` first. Only call it if you genuinely don't know the current time.
 - When setting reminders, if the user says a relative time like "in 5 minutes" or "tomorrow at 9am", calculate the absolute time directly and call `set_reminder` once.
+- When asked whether something exists — a reminder, task, note, or preference — ALWAYS look it up with the matching tool and then answer YES or NO directly in the same message. If the tool returns nothing, say so plainly, e.g. "No, there's no prayer reminder set up." or "No tasks matching that." NEVER reply only "I'll check" / "let me check" without immediately giving the result.
 - If a request is ambiguous, ask for clarification rather than guessing.
 """
 
