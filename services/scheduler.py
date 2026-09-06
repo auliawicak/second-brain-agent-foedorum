@@ -1,10 +1,25 @@
-"""APScheduler integration for automated jobs — news, agenda, reminders."""
+"""APScheduler integration for automated jobs — brief, close-out, triggers.
+
+Phase 7 consolidates every scheduled message into a small set of jobs:
+
+  1. morning_brief   — ONE 06:00 brief (tasks/reminders/overdue + 1 news item)
+  2. evening_closeout— ONE 21:00 "what got done today?" message
+  3. weekly_review   — Friday 17:00 (completed vs slipped + one pattern)
+  4. condition_checks— every 15 min (nudges, deduped once/day/entity)
+  5. reminder_check  — every minute (also stamps the heartbeat)
+  6. maintenance     — nightly 03:00 (retention + markdown export + backup)
+  7. nightly_consolidation — 00:15 (Phase 6 learning loop)
+  8. persona_proposal — 1st of month 04:00 (Phase 6 operating principles)
+
+The persistent job store is purged on every boot so stale jobs from earlier
+phases (the old separate news/agenda/hygiene jobs) can never fire again.
+"""
 
 from __future__ import annotations
 
 import logging
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import wraps
 from typing import Any, Awaitable, Callable
 
@@ -22,18 +37,24 @@ _db = None  # storage.database.Database
 _send_message = None  # async callable(str) -> None
 
 
-def inject_dependencies(brain, db, send_message_fn) -> None:
+def inject_dependencies(brain, db, send_message_fn, proposal_sender=None) -> None:
     """Inject runtime dependencies for scheduled jobs.
 
     Args:
         brain: SecondBrain instance for AI processing.
         db: Database instance for data access.
         send_message_fn: Async function to send a Telegram message.
+        proposal_sender: Optional async sender for Phase 6 proposals
+            (wired into services.messaging).
     """
     global _brain, _db, _send_message
     _brain = brain
     _db = db
     _send_message = send_message_fn
+    if proposal_sender is not None:
+        from services.messaging import set_proposal_sender
+
+        set_proposal_sender(proposal_sender)
 
 
 def alert_on_error(
@@ -56,80 +77,55 @@ def alert_on_error(
     return wrapper
 
 
-# ─── Scheduled Jobs ──────────────────────────────────────────────────────────
+# ─── Phase 7 — merged morning & evening messages ───────────────────────────
 
 
 @alert_on_error
-async def morning_news_job() -> None:
-    """Fetch, curate, and deliver the morning news digest."""
-    logger.info("⏰ Running morning news job...")
-    try:
-        from services.news import fetch_all_news
+async def morning_brief_job() -> None:
+    """06:00: send ONE merged brief (tasks + reminders + overdue + 1 news)."""
+    if _db is None or _brain is None:
+        raise RuntimeError("Morning brief not wired (db/brain not injected).")
+    from services.brief import build_morning_brief
 
-        # Fetch raw articles
-        raw_articles = await fetch_all_news()
-
-        if "No news articles available" in raw_articles:
-            await _send_message("☀️ Good morning! Unfortunately, I couldn't fetch any news today. I'll try again later.")
-            return
-
-        # AI-curate the news
-        digest = await _brain.curate_news(raw_articles)
-
-        # Save to database
-        today = datetime.now(Config.TIMEZONE).strftime("%Y-%m-%d")
-        await _db.save_digest(today, digest)
-
-        # Send to user
-        header = f"☀️ **Good Morning! Here's your news digest for {today}**\n\n"
-        await _send_message(header + digest)
-
-        logger.info("Morning news delivered successfully.")
-
-    except Exception:
-        logger.exception("Failed to deliver morning news.")
-        await _send_message("⚠️ Sorry, there was an error preparing today's news digest. I'll check into it.")
+    brief = await build_morning_brief(_db, _brain)
+    await _send_message(brief)
+    logger.info("Morning brief delivered.")
 
 
 @alert_on_error
-async def daily_agenda_job() -> None:
-    """Send the daily agenda — today's tasks and reminders."""
-    logger.info("⏰ Running daily agenda job...")
-    try:
-        today = datetime.now(Config.TIMEZONE).strftime("%Y-%m-%d")
-        tasks = await _db.get_today_tasks(today)
-        reminders = await _db.get_active_reminders()
+async def closeout_job() -> None:
+    """21:00: one evening check-in. The reply is logged and can fuel the
+    nightly consolidation via the ordinary corrections flow — no nagging."""
+    if _db is None:
+        raise RuntimeError("Close-out not wired (db not injected).")
+    now = datetime.now(Config.TIMEZONE).replace(tzinfo=None)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = day_start + timedelta(days=1)
+    created, completed = await _db.get_day_task_stats(
+        day_start.isoformat(), day_end.isoformat()
+    )
 
-        lines = [f"📋 **Daily Agenda — {today}**\n"]
+    line = f"🌙 **Evening check-in — {now.strftime('%A')}**\n\nWhat got done today?"
+    if completed:
+        line += f" You completed {completed} task{'s' if completed != 1 else ''}. 🎉"
+    line += "\nAnything I should remember for tomorrow? Just reply."
+    await _send_message(line)
+    logger.info("Evening close-out delivered (created=%d, completed=%d).", created, completed)
 
-        if tasks:
-            lines.append("**📌 Tasks:**")
-            for t in tasks:
-                priority_icon = {"urgent": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(
-                    t.priority.value, ""
-                )
-                due = f" (due: {t.due_date})" if t.due_date else ""
-                lines.append(f"  {priority_icon} #{t.id} {t.description}{due}")
-        else:
-            lines.append("**📌 Tasks:** All clear! No pending tasks. 🎉")
 
-        if reminders:
-            lines.append("\n**⏰ Upcoming Reminders:**")
-            for r in reminders:
-                lines.append(f"  • {r.message} — {r.trigger_time}")
-
-        lines.append("\nHave a productive day! 💪")
-        await _send_message("\n".join(lines))
-
-        logger.info("Daily agenda delivered.")
-
-    except Exception:
-        logger.exception("Failed to deliver daily agenda.")
+# ─── Reminders + heartbeat ──────────────────────────────────────────────────
 
 
 @alert_on_error
 async def reminder_check_job() -> None:
-    """Check for due reminders and fire them."""
+    """Every minute: fire due reminders, then stamp the heartbeat.
+
+    The heartbeat is folded into this job so the old separate 5-minute job
+    can be dropped (Phase 7: total scheduler jobs ≤ 8). Granularity is
+    strictly better than before (<1 min instead of 5 min).
+    """
+    if _db is None:
+        raise RuntimeError("Reminder checker not wired (db not injected).")
     try:
         now_iso = datetime.now(Config.TIMEZONE).isoformat()
         due_reminders = await _db.get_due_reminders(now_iso)
@@ -156,48 +152,49 @@ async def reminder_check_job() -> None:
                     reminder.id,
                 )
 
+        try:
+            await _db.update_heartbeat()
+        except Exception:
+            logger.exception("Heartbeat stamp failed.")
     except Exception:
         logger.exception("Error checking reminders.")
 
 
-@alert_on_error
-async def heartbeat_job() -> None:
-    """Stamp the heartbeat table so downtime is measurable on restart."""
-    if _db is None:
-        raise RuntimeError("Database not injected for heartbeat job.")
-    await _db.update_heartbeat()
-
-
-# ─── Phase 3 — data hygiene (nightly) ───────────────────────────────────────
+# ─── Phase 7 — condition checks (every 15 min) ─────────────────────────────
 
 
 @alert_on_error
-async def retention_job() -> None:
-    """Nightly (03:00): export old conversations and prune them."""
+async def condition_checks_job() -> None:
+    """15-minute pass: fire condition nudges (deduped once per day per entity).
+
+    Quiet runs send nothing; a run that fires groups everything into a single
+    message (§7.4).
+    """
     if _db is None:
-        raise RuntimeError("Database not injected for retention job.")
-    from services.export import run_retention
+        raise RuntimeError("Condition checks not wired (db not injected).")
+    from services.triggers import run_condition_checks
+
+    lines = await run_condition_checks(_db)
+    if not lines:
+        return
+    body = "\n\n".join(lines)
+    if len(lines) > 1:
+        body = "🧠 **A few things need your attention:**\n\n" + body
+    await _send_message(body)
+
+
+# ─── Phase 3 + maintenance (one nightly job) ───────────────────────────────
+
+
+@alert_on_error
+async def maintenance_job() -> None:
+    """Nightly 03:00: retention prune → markdown vault export → GCS backup."""
+    if _db is None:
+        raise RuntimeError("Maintenance not wired (db not injected).")
+    from services.export import run_backup, run_markdown_export, run_retention
 
     await run_retention(_db)
-
-
-@alert_on_error
-async def markdown_export_job() -> None:
-    """Nightly (03:15): write the Obsidian vault (notes + tasks, incremental)."""
-    if _db is None:
-        raise RuntimeError("Database not injected for markdown export job.")
-    from services.export import run_markdown_export
-
     await run_markdown_export(_db)
-
-
-@alert_on_error
-async def backup_job() -> None:
-    """Nightly (03:30): hot-copy DB + vault to BACKUP_BUCKET (or skip if unset)."""
-    if _db is None:
-        raise RuntimeError("Database not injected for backup job.")
-    from services.export import run_backup
-
     result = await run_backup(_db)
     if result.get("skipped"):
         logger.info("Backup skipped (BACKUP_BUCKET unset).")
@@ -241,105 +238,190 @@ def _next_cron_occurrence(cron_expression: str) -> str | None:
         return None
 
 
+# ─── Phase 6 — learning loop (nightly / weekly / monthly) ───────────────────
+
+
+@alert_on_error
+async def consolidation_job() -> None:
+    """Nightly (00:15): consolidate the day's corrections into preferences."""
+    if _db is None or _brain is None:
+        raise RuntimeError("Learning loop not wired (db/brain not injected).")
+    from services.consolidation import consolidate_nightly
+
+    summary = await consolidate_nightly(_db, _brain)
+    analyzed = summary.get("analyzed", 0)
+    if summary:
+        logger.info(
+            "Nightly consolidation: %d episodes → %d applied, %d superseded, %d forgotten.",
+            analyzed,
+            len(summary.get("applied", [])),
+            len(summary.get("superseded", [])),
+            len(summary.get("forgotten", [])),
+        )
+    else:
+        logger.info("Nightly consolidation: nothing to consolidate (idle).")
+
+
+@alert_on_error
+async def weekly_review_job() -> None:
+    """Friday 17:00 (§7.3): completed vs slipped + one observed pattern."""
+    if _db is None or _brain is None:
+        raise RuntimeError("Weekly review not wired.")
+    if _send_message is None:
+        raise RuntimeError("Message sender not wired for weekly review.")
+    from services.consolidation import weekly_conversation_review
+
+    review = await weekly_conversation_review(_db, _brain)
+    if not review:
+        logger.info("Weekly review: nothing to summarize this week.")
+        return
+    await _send_message(f"📈 **Weekly review**\n\n{review}")
+
+
+@alert_on_error
+async def persona_proposal_job() -> None:
+    """Monthly (1st, 04:00): draft a candidate operating-principles update
+    and send it to the owner as an interactive proposal (§6.5)."""
+    if _db is None or _brain is None:
+        raise RuntimeError("Persona proposal not wired.")
+    from services.persona import build_persona_proposal
+
+    result = await build_persona_proposal(_db, _brain)
+    logger.info("Persona proposal job finished (proposed=%r...)", (result or "")[:40])
+
+
 # ─── Scheduler Setup ─────────────────────────────────────────────────────────
 
 
-def create_scheduler() -> AsyncIOScheduler:
+def create_scheduler(jobstore_url: str | None = None) -> AsyncIOScheduler:
     """Create and configure the AsyncIOScheduler with persistent job store.
+
+    Registers exactly 8 jobs. The store is purged on every boot so stale
+    persisted jobs from earlier phases (separate news/agenda/heartbeat and
+    the three individual hygiene jobs) can never fire again — Phase 7
+    acceptance requires exactly one scheduled message at 06:00 and ≤8 jobs.
+
+    Args:
+        jobstore_url: Override the SQLAlchemy store URL (tests pass an
+            in-memory "sqlite://" to avoid touching the real store file).
 
     Returns:
         Configured but not-yet-started scheduler.
     """
-    db_url = f"sqlite:///{Config.DATABASE_PATH.parent / 'scheduler_jobs.db'}"
-
-    jobstores = {
-        "default": SQLAlchemyJobStore(url=db_url),
-    }
+    db_url = (
+        jobstore_url
+        or f"sqlite:///{Config.DATABASE_PATH.parent / 'scheduler_jobs.db'}"
+    )
 
     scheduler = AsyncIOScheduler(
-        jobstores=jobstores,
+        jobstores={"default": SQLAlchemyJobStore(url=db_url)},
         timezone=Config.TIMEZONE_STR,
     )
 
-    # Morning news — daily at configured time
-    scheduler.add_job(
-        morning_news_job,
-        trigger="cron",
-        hour=Config.NEWS_DELIVERY_HOUR,
-        minute=Config.NEWS_DELIVERY_MINUTE,
-        id="morning_news",
-        name="Morning News Digest",
-        replace_existing=True,
-        misfire_grace_time=3600,  # Allow up to 1 hour late
-    )
+    scheduler.remove_all_jobs()  # boot-fresh job set (see docstring)
 
-    # Daily agenda — daily at configured time
+    # 1. Morning brief — ONE merged 06:00 message (§7.1)
     scheduler.add_job(
-        daily_agenda_job,
+        morning_brief_job,
         trigger="cron",
-        hour=Config.AGENDA_DELIVERY_HOUR,
-        minute=Config.AGENDA_DELIVERY_MINUTE,
-        id="daily_agenda",
-        name="Daily Agenda",
+        hour=Config.BRIEF_HOUR,
+        minute=Config.BRIEF_MINUTE,
+        id="morning_brief",
+        name="Morning Brief (unified)",
         replace_existing=True,
         misfire_grace_time=3600,
     )
 
-    # Reminder checker — every minute
+    # 2. Evening close-out (§7.2)
+    scheduler.add_job(
+        closeout_job,
+        trigger="cron",
+        hour=Config.CLOSEOUT_HOUR,
+        minute=Config.CLOSEOUT_MINUTE,
+        id="evening_closeout",
+        name="Evening Close-out",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+    # 3. Weekly review — Friday deep-tier review (§7.3)
+    scheduler.add_job(
+        weekly_review_job,
+        trigger="cron",
+        day_of_week=Config.REVIEW_DAY,
+        hour=Config.REVIEW_HOUR,
+        minute=Config.REVIEW_MINUTE,
+        id="weekly_review",
+        name="Weekly Review (completed vs slipped)",
+        replace_existing=True,
+        misfire_grace_time=7200,
+    )
+
+    # 4. Condition checks — one every-15-minutes pass (§7.4)
+    scheduler.add_job(
+        condition_checks_job,
+        trigger="interval",
+        minutes=15,
+        id="condition_checks",
+        name="Condition Checks",
+        replace_existing=True,
+    )
+
+    # 5. Reminder checker — every minute (heartbeat folded in)
     scheduler.add_job(
         reminder_check_job,
         trigger="interval",
         minutes=1,
         id="reminder_check",
-        name="Reminder Checker",
+        name="Reminder Checker + Heartbeat",
         replace_existing=True,
     )
 
-    # Heartbeat — every 5 minutes
+    # 6. Nightly maintenance — retention, markdown export, backup (03:00)
     scheduler.add_job(
-        heartbeat_job,
-        trigger="interval",
-        minutes=5,
-        id="heartbeat",
-        name="Heartbeat",
-        replace_existing=True,
-    )
-
-    # Phase 3 — data hygiene, nightly (Asia/Jakarta)
-    scheduler.add_job(
-        retention_job,
+        maintenance_job,
         trigger="cron",
         hour=3, minute=0,
-        id="retention",
-        name="Conversation Retention (export + prune)",
+        id="maintenance",
+        name="Nightly Maintenance (retention + export + backup)",
         replace_existing=True,
         misfire_grace_time=3600,
     )
+
+    # 7. Phase 6 — nightly preference consolidation (00:15)
     scheduler.add_job(
-        markdown_export_job,
+        consolidation_job,
         trigger="cron",
-        hour=3, minute=15,
-        id="markdown_export",
-        name="Markdown Vault Export",
+        hour=0, minute=15,
+        id="nightly_consolidation",
+        name="Nightly Preference Consolidation",
         replace_existing=True,
-        misfire_grace_time=3600,
+        misfire_grace_time=7200,
     )
+
+    # 8. Phase 6 — monthly operating-principles proposal (1st, 04:00)
     scheduler.add_job(
-        backup_job,
+        persona_proposal_job,
         trigger="cron",
-        hour=3, minute=30,
-        id="backup",
-        name="GCS Backup",
+        day=1,
+        hour=4, minute=0,
+        id="persona_proposal",
+        name="Monthly Operating-Principles Proposal",
         replace_existing=True,
         misfire_grace_time=3600,
     )
 
     logger.info(
-        "Scheduler configured: news at %02d:%02d, agenda at %02d:%02d (%s)",
-        Config.NEWS_DELIVERY_HOUR,
-        Config.NEWS_DELIVERY_MINUTE,
-        Config.AGENDA_DELIVERY_HOUR,
-        Config.AGENDA_DELIVERY_MINUTE,
+        "Scheduler configured: brief %02d:%02d, close-out %02d:%02d, "
+        "weekly review %s %02d:%02d, reminders every minute, "
+        "condition checks every 15 min (%s)",
+        Config.BRIEF_HOUR,
+        Config.BRIEF_MINUTE,
+        Config.CLOSEOUT_HOUR,
+        Config.CLOSEOUT_MINUTE,
+        Config.REVIEW_DAY,
+        Config.REVIEW_HOUR,
+        Config.REVIEW_MINUTE,
         Config.TIMEZONE_STR,
     )
 

@@ -16,6 +16,8 @@ CONFIRMING_TOOLS = {
     "save_note",
     "set_reminder",
     "save_preference",
+    "remember_fact",
+    "record_correction",
 }
 
 # How long a pending confirmation stays valid before it must be re-requested.
@@ -92,6 +94,20 @@ def confirmation_question(tool_name: str, args: dict | None) -> str | None:
         return (
             f"Do you want me to remember this about you: "
             f"**{key}** = *{value}*?"
+        )
+
+    if tool_name == "remember_fact":
+        fact = _clip(args.get("fact", ""), 90)
+        if not fact:
+            return None
+        return f"Do you want me to remember this about you: *{fact}*?"
+
+    if tool_name == "record_correction":
+        correction = _clip(args.get("correction", ""), 90)
+        if not correction:
+            return None
+        return (
+            f"Shall I record this so I do better next time: *{correction}*?"
         )
 
     return None

@@ -252,6 +252,64 @@ async def save_preference(key: str, value: str) -> str:
     return f"🧠 Learned and saved preference: {key} = {value}"
 
 
+# ─── Learning-Loop Tools (Phase 6 §6.2) ──────────────────────────────────────
+
+
+async def remember_fact(
+    fact: str,
+    category: str = "personal",
+    keywords: str = "",
+) -> str:
+    """Remember a durable preference, habit, or recurring fact about the user.
+
+    Use this whenever the user shares a preference, habit, or standing fact
+    that matters beyond this conversation. The fact is stored with the
+    learning loop: restatements strengthen it, contradictions supersede it.
+
+    Args:
+        fact: The preference as a full statement (e.g. 'Prefers black coffee in the morning').
+        category: One of 'personal', 'diet', 'work', 'health', 'home', 'social', 'finance', 'travel'.
+        keywords: Optional space-separated retrieval keywords (e.g. 'coffee morning drink').
+    """
+    db = _get_db()
+    outcome, pid = await db.merge_fact(
+        fact=fact,
+        category=category,
+        keywords=keywords,
+        confidence=0.7,
+        evidence_ref="assistant:remember_fact",
+    )
+    label = {
+        "new": "Learned",
+        "matched": "Refreshed (I already knew this)",
+        "superseded": "Revised",
+    }.get(outcome, "Saved")
+    return f"🧠 {label} preference #{pid}: {fact}"
+
+
+async def record_correction(
+    correction: str,
+    scope: str = "general",
+) -> str:
+    """Record a user correction about how to do things, so future turns improve.
+
+    Use this when the user tells you how to do something differently, points
+    out a wrong assumption about them, or corrects something you did. The
+    nightly consolidation turns accumulations of these into stable preferences.
+
+    Args:
+        correction: What the user wants done differently (e.g. 'Always schedule my workouts for the morning').
+        scope: Which area it applies to: 'general', 'tasks', 'notes', 'reminders', 'responses', 'preferences'.
+    """
+    db = _get_db()
+    cid = await db.add_correction(
+        trigger="explicit",
+        user_message=correction,
+        correction=correction,
+    )
+    return f"🛠️ Recorded correction #{cid} (scope: {scope}). I'll apply this going forward and consolidate it tonight."
+
+
 async def get_news() -> str:
     """Fetch and curate the latest top news stories.
 
@@ -280,5 +338,7 @@ ALL_TOOLS = [
     set_reminder,
     get_current_datetime,
     save_preference,
+    remember_fact,
+    record_correction,
     get_news,
 ]

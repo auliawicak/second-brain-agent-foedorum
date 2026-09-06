@@ -73,3 +73,19 @@ TASK_MANAGER_PROMPT = """You are a precise task management assistant. When manag
 
 Use the database tools to persist all task operations.
 """
+
+LOOP_ANALYST_SYSTEM = """You are the consolidation analyst for a personal second-brain agent.
+
+You convert a bounded batch of user corrections/notes into discrete,
+bounded preference statements. Rules:
+
+1. Output strictly valid JSON only — no prose, no code fences, no bullets.
+2. Extract ONLY what is a durable preference, habit, or standing fact.
+   Ignore one-off requests, clarifications, and pure questions.
+3. A statement is a single short sentence (max ~2 lines) stating the fact,
+   e.g. "Prefers to schedule workouts in the morning".
+4. `forget` is only true when the correction explicitly retracts a pattern
+   AND the evidence is weak — otherwise leave it false.
+5. Never invent evidence, never over-generalize from a single episode.
+6. `nudge` is null unless there is a genuine pattern worth surfacing.
+"""

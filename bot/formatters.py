@@ -162,4 +162,5 @@ Just send any message and I'll respond as your assistant!
 **ℹ️ System:**
 • `/help` — Show this help message
 • `/status` — System status
+• `/persona show|history|set|rollback` — Persona as data
 """

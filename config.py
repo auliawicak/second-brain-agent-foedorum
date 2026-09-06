@@ -43,12 +43,31 @@ class Config:
     TIMEZONE: ZoneInfo = ZoneInfo(TIMEZONE_STR)
 
     # --- Schedule ---
+    # Legacy (pre-Phase 7) keys kept for backward compatibility; the merged
+    # brief (§7.1) defaults to NEWS_DELIVERY_HOUR when BRIEF_HOUR is unset.
     NEWS_DELIVERY_HOUR: int = int(os.environ.get("NEWS_DELIVERY_HOUR", "6"))
     NEWS_DELIVERY_MINUTE: int = int(os.environ.get("NEWS_DELIVERY_MINUTE", "0"))
     AGENDA_DELIVERY_HOUR: int = int(os.environ.get("AGENDA_DELIVERY_HOUR", "6"))
     AGENDA_DELIVERY_MINUTE: int = int(
         os.environ.get("AGENDA_DELIVERY_MINUTE", "30")
     )
+
+    # --- Unified briefs & triggers (Phase 7) ---
+    # One 06:00 brief replaces the old separate news + agenda messages (§7.1).
+    # BRIEF_HOUR falls back to NEWS_DELIVERY_HOUR for existing deployments.
+    BRIEF_HOUR: int = int(
+        os.environ.get("BRIEF_HOUR")
+        or os.environ.get("NEWS_DELIVERY_HOUR")
+        or "6"
+    )
+    BRIEF_MINUTE: int = int(os.environ.get("BRIEF_MINUTE", "0"))
+    # Evening close-out (§7.2): a single "what got done today?" at 21:00.
+    CLOSEOUT_HOUR: int = int(os.environ.get("CLOSEOUT_HOUR", "21"))
+    CLOSEOUT_MINUTE: int = int(os.environ.get("CLOSEOUT_MINUTE", "0"))
+    # Weekly review (§7.3): Friday 17:00, deep tier, single call.
+    REVIEW_DAY: str = os.environ.get("REVIEW_DAY", "fri").lower()
+    REVIEW_HOUR: int = int(os.environ.get("REVIEW_HOUR", "17"))
+    REVIEW_MINUTE: int = int(os.environ.get("REVIEW_MINUTE", "0"))
 
     # --- Storage ---
     PROJECT_DIR: Path = Path(__file__).parent
@@ -80,6 +99,16 @@ class Config:
     MAX_CONTEXT_MESSAGES: int = int(os.environ.get("MAX_CONTEXT_MESSAGES", "12"))
     MAX_PREFS_INJECTED: int = int(os.environ.get("MAX_PREFS_INJECTED", "8"))
     MAX_PROMPT_CHARS: int = int(os.environ.get("MAX_PROMPT_CHARS", "24000"))
+
+    # --- Learning loop (Phase 6) ---
+    # Cap on live (non-superseded) preference rows; lowest-confidence non-core
+    # rows are dropped beyond this. Core rows are never dropped.
+    MAX_PREFERENCES: int = int(os.environ.get("MAX_PREFERENCES", "500"))
+    # Retrieval caps (§6.4): cores always present (≤15) plus FTS top (≤8).
+    MAX_CORE_PREFS_INJECTED: int = int(os.environ.get("MAX_CORE_PREFS_INJECTED", "15"))
+    MAX_FTS_PREFS_INJECTED: int = int(os.environ.get("MAX_FTS_PREFS_INJECTED", "8"))
+    # Confidence floor — rows below this stop being injected or retrieved (§6.3).
+    MIN_PREF_CONFIDENCE: float = float(os.environ.get("MIN_PREF_CONFIDENCE", "0.3"))
 
     @classmethod
     def validate(cls) -> list[str]:

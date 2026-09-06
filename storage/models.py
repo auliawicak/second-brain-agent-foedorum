@@ -137,12 +137,28 @@ class DailyDigest(BaseModel):
 
 
 class Preference(BaseModel):
-    """A learned user preference or habit."""
+    """A learned user preference or habit.
+
+    Phase 6: gained `fact` (the statement), `category`, `keywords`,
+    `confidence`, `evidence_count`, `first_seen/last_seen`, `is_core`,
+    `superseded_by` (supersession chain, never overwrite) and `source_refs`.
+    `key`/`value` remain for backward compatibility with the original tool.
+    """
 
     id: int | None = None
     key: str  # A short identifier or topic (e.g., 'morning_drink', 'workout_time')
     value: str  # The actual preference or habit details
     created_at: str = Field(default_factory=lambda: datetime.now().isoformat())
+    fact: str = ""
+    category: str = "personal"
+    keywords: str = ""
+    confidence: float = 0.5
+    evidence_count: int = 1
+    first_seen: str | None = None
+    last_seen: str | None = None
+    is_core: int = 0
+    superseded_by: int | None = None
+    source_refs: str | None = None
 
 
 class PreferenceCreate(BaseModel):

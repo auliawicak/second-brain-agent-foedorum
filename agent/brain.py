@@ -9,11 +9,16 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import time
 from dataclasses import dataclass
 
-from agent.context import build_context, build_system_prompt, cap_preferences
+from agent.context import (
+    assemble_persona_block,
+    build_context,
+    build_system_prompt,
+)
 from agent.health import ModelHealth, UsageTracker
 from agent.parsing import (
     extract_json_object,
@@ -229,8 +234,10 @@ class SecondBrain:
         """
         await self.db.log_conversation("user", message)
 
-        preferences = await self.db.get_all_preferences()
-        pref_lines = cap_preferences([f"- **{p.key}**: {p.value}" for p in preferences])
+        # §6.4 retrieval-over-injection: cores always present, plus FTS5 top
+        # matches for this message. No fixed-size hallucination-prone dump.
+        preferences = await self.db.get_context_preferences(message)
+        pref_lines = [f"- **{p.key}**: {p.fact}" for p in preferences]
         prefs_str = "\n".join(pref_lines)
 
         pref_section = ""
@@ -243,9 +250,25 @@ class SecondBrain:
         time_section = f"\n## Current Time\n{now.strftime('%A, %B %d, %Y at %H:%M:%S (UTC+7, Asia/Jakarta)')}\n"
 
         tool_descriptions = self._build_tool_descriptions()
+        sections = [time_section, pref_section, tool_descriptions + TOOL_POLICY]
+
+        # §8.1: the persona is DATA now — assembled fresh from the active
+        # `persona` row every turn (Voice → Principles → Mode rules), so
+        # /persona edits apply to the very next reply, no restart. It is
+        # capped with the rest of the system block.
+        persona = await self.db.get_active_persona_config()
+        if persona:
+            sections.append(
+                assemble_persona_block(
+                    voice=persona["voice"],
+                    principles=persona["principles"],
+                    mode_rules=persona.get("mode_rules"),
+                )
+            )
+
         system_prompt = build_system_prompt(
             MAIN_PERSONA,
-            sections=[time_section, pref_section, tool_descriptions + TOOL_POLICY],
+            sections=sections,
         )
 
         self._chat_history.append({"role": "user", "content": message})
@@ -403,6 +426,47 @@ class SecondBrain:
         )
 
         return text or "Could not curate news at this time."
+
+    async def curate_single_news_item(
+        self, raw_articles: str, context: str = ""
+    ) -> dict | None:
+        """§7.1: pick the ONE story from today's raw articles that matters
+        most for the user *right now*.
+
+        Returns {"headline", "summary", "why", "url"} — or None when the
+        model output can't be parsed (caller falls back to the first item).
+        The morning brief shows exactly one item, never a digest.
+        """
+        prompt = (
+            "From the raw articles below, choose the SINGLE one most relevant "
+            "to the person's current focus and say why it matters — one line "
+            "each. Return strictly valid JSON only (no prose, no fences):\n"
+            '{"headline": "...", "summary": "...", "why": "...", "url": "..."}\n\n'
+            f"PERSON'S CURRENT FOCUS:\n{context or '(no specific focus today)'}\n\n"
+            f"RAW ARTICLES:\n{raw_articles}"
+        )
+        text = await self._generate(
+            tier=TIER_MAP["curate_news"],
+            messages=[{"role": "user", "content": prompt}],
+            system_instruction=(
+                "You are a terse news curator. Pick a single headline. "
+                "Never invent headlines, summaries or URLs not present in the input."
+            ),
+            temperature=0.3,
+            max_tokens=220,
+        )
+        try:
+            obj = json.loads(text)
+            if isinstance(obj, dict) and (obj.get("headline") or "").strip():
+                return {
+                    "headline": str(obj["headline"]).strip()[:160],
+                    "summary": str(obj.get("summary") or "").strip()[:200],
+                    "why": str(obj.get("why") or "").strip()[:180],
+                    "url": str(obj.get("url") or "").strip(),
+                }
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return None
 
     async def classify_tasks(self, text: str) -> str:
         """Route a free-text into our tool model via the `classify` tier."""

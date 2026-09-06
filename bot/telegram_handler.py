@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import secrets
 import time
 from datetime import datetime
@@ -35,6 +36,7 @@ from bot.feedback import (
 from bot.formatters import format_help_message, split_long_message
 from bot.middleware import authorized_only, error_handler
 from config import Config
+from services.messaging import set_proposal_sender
 from services.news import fetch_all_news
 from storage.database import Database
 
@@ -43,6 +45,7 @@ logger = logging.getLogger(__name__)
 EDIT_WINDOW_SECONDS = 600      # user edit/delete within 10 min of agent create
 THUMBSDOWN_TIMEOUT = 300       # drop an unanswered 👎 prompt after 5 minutes
 MSG_META_CAP = 500
+PROCESS_START_TS = time.time()  # bot process start (for /status uptime)
 
 
 class TelegramBot:
@@ -60,6 +63,78 @@ class TelegramBot:
         self._pending_thumbsdown: dict[int, dict] = {}     # chat_id -> state
         self._msg_meta: dict[str, dict] = {}               # token -> metadata
         self._agent_created: list[dict] = []               # recent creates by agent
+        # Phase 6 interactive proposals (token -> meta). Small, in-memory.
+        self._proposals: dict[str, dict] = {}
+
+    async def send_proposal(
+        self,
+        old_content: str,
+        proposed: str,
+        rationale: str,
+        *,
+        meta: dict | None = None,
+    ) -> str:
+        """Send an interactive proposal (persona/consolidation) to the owner.
+
+        Renders a blockquote + caption + Approve/Reject buttons. The token
+        returned is used by scheduled jobs to track the proposal's decision.
+        """
+        token = secrets.token_urlsafe(8)
+        self._proposals[token] = {
+            "old": old_content,
+            "proposed": proposed,
+            "rationale": rationale,
+            "meta": meta or {},
+            "created_at": time.time(),
+        }
+        self._prune_proposals()
+
+        if not self.app:
+            return token  # app not built yet (tests / startup)
+
+        markup = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("✅ Approve", callback_data=f"pprove:{token}"),
+                    InlineKeyboardButton("❌ Reject", callback_data=f"preject:{token}"),
+                ]
+            ]
+        )
+        text = (
+            f"> {rationale.strip()}\n\n{proposed}\n\n"
+            f"*Approve to apply now — or Reject to keep what you have.*"
+        )
+        parts = split_long_message(text)
+        try:
+            await self.app.bot.send_message(
+                chat_id=Config.TELEGRAM_USER_ID,
+                text=parts[0],
+                parse_mode="Markdown",
+                reply_markup=markup,
+            )
+            for part in parts[1:]:
+                await self.app.bot.send_message(
+                    chat_id=Config.TELEGRAM_USER_ID,
+                    text=part,
+                    parse_mode="Markdown",
+                )
+        except Exception:
+            logger.warning("Failed to send proposal message (attempt fallback).")
+            try:
+                await self.app.bot.send_message(
+                    chat_id=Config.TELEGRAM_USER_ID,
+                    text=parts[0],
+                    reply_markup=markup,
+                )
+            except Exception:
+                logger.exception("Proposal message failed even without Markdown.")
+        return token
+
+    def _prune_proposals(self) -> None:
+        cutoff = time.time() - 7 * 24 * 3600
+        self._proposals = {
+            k: v for k, v in self._proposals.items() if v["created_at"] >= cutoff
+        }
 
     def build(self) -> Application:
         """Build the Telegram application with all handlers."""
@@ -90,15 +165,22 @@ class TelegramBot:
             ("remind", self._cmd_remind),
             ("think", self._cmd_think),
             ("status", self._cmd_status),
+            ("persona", self._cmd_persona),
         ]
 
         for name, handler in commands:
             self.app.add_handler(CommandHandler(name, handler))
 
+        # Phase 6: let the scheduled proposal pipeline send into this bot.
+        set_proposal_sender(self.send_proposal)
+
         # Free-text message handler (must be added last)
         self.app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message)
         )
+
+        # Interactive proposal buttons (persona/consolidation, Phase 6).
+        self.app.add_handler(CallbackQueryHandler(self._handle_proposal_callback, pattern=r"^(pprove|preject):"))
 
         # Inline feedback buttons (👍 / 👎) on non-trivial replies (Phase 2).
         self.app.add_handler(CallbackQueryHandler(self._handle_callback))
@@ -124,6 +206,7 @@ class TelegramBot:
             BotCommand("news", "📰 Latest news digest"),
             BotCommand("remind", "⏰ Set a reminder"),
             BotCommand("think", "🧠 Deep reasoning mode"),
+            BotCommand("persona", "🎭 View/edit/rollback persona"),
             BotCommand("help", "❓ Show all commands"),
             BotCommand("status", "ℹ️ System status"),
         ])
@@ -359,17 +442,33 @@ class TelegramBot:
         up7, down7 = await self.db.get_feedback_counts(days=7)
 
         now = datetime.now(Config.TIMEZONE)
+        uptime_s = int(time.time() - PROCESS_START_TS)
+        uptime_str = f"{uptime_s // 3600}h{(uptime_s % 3600) // 60}m"
+        db_bytes = 0
+        try:
+            db_bytes = os.path.getsize(Config.DATABASE_PATH)
+        except OSError:
+            pass
+        prefs = await self.db.get_all_preferences()
+        pending_follow_ups = len(self._pending_thumbsdown) + len(self._proposals)
+
         status = (
             f"ℹ️ **Second Brain Status**\n\n"
             f"🕐 Current time: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}\n"
+            f"⏱️ Uptime: {uptime_str}\n"
+            f"💾 DB size: {db_bytes / 1024:.1f} KB\n"
             f"📌 Pending tasks: {len(pending_tasks)}\n"
             f"⏰ Active reminders: {len(active_reminders)}\n"
             f"📝 Notes stored: {'Yes' if recent_notes else 'None yet'}\n"
+            f"💬 Preferences: {len(prefs)}\n"
+            f"🔁 Pending follow-ups: {pending_follow_ups}\n"
             f"🌐 Egress MTD prompt: {month_bytes / 1024:.1f} KB\n"
             f"🗣️ Corrections (7d): {corr7}\n"
             f"👍/👎 Feedback (7d): {up7}/{down7}\n"
-            f"📰 News at: {Config.NEWS_DELIVERY_HOUR:02d}:{Config.NEWS_DELIVERY_MINUTE:02d}\n"
-            f"📋 Agenda at: {Config.AGENDA_DELIVERY_HOUR:02d}:{Config.AGENDA_DELIVERY_MINUTE:02d}\n\n"
+            f"🎭 Persona: v{(await self.db.get_active_persona_config() or {}).get('version', '-')}\n"
+            f"📰 Morning brief at: {Config.BRIEF_HOUR:02d}:{Config.BRIEF_MINUTE:02d}\n"
+            f"🌙 Close-out at: {Config.CLOSEOUT_HOUR:02d}:{Config.CLOSEOUT_MINUTE:02d}\n"
+            f"📋 Review: {Config.REVIEW_DAY} {Config.REVIEW_HOUR:02d}:{Config.REVIEW_MINUTE:02d}\n\n"
         )
 
         # Per-model lines
@@ -389,6 +488,57 @@ class TelegramBot:
         status += "**Model pool:**\n" + "\n".join(lines) if lines else "**Model pool:** empty"
 
         for part in split_long_message(status):
+            await update.message.reply_text(part, parse_mode="Markdown")
+
+    @authorized_only
+    @error_handler
+    async def _cmd_persona(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /persona — view, edit, and roll back the data persona (§8.2).
+
+        Subcommands: show | set <layer> <text> | history | rollback <version>.
+        The persona is re-read from the DB every turn, so edits apply to the
+        next reply with no restart.
+        """
+        from services.persona_control import (
+            persona_history,
+            persona_rollback,
+            persona_set,
+            persona_show,
+        )
+
+        args = (update.message.text or "").split(maxsplit=3)
+        usage = (
+            "🎭 **Persona — usage:**\n"
+            "`/persona show` — show the active persona\n"
+            "`/persona set voice <text>` — change voice/tone\n"
+            "`/persona set principles <text>` — change rules\n"
+            "`/persona set mode_rules <text>` — change mode rules\n"
+            "`/persona history` — list versions\n"
+            "`/persona rollback <version>` — revert to a version"
+        )
+
+        if len(args) < 2:
+            reply = usage
+        else:
+            sub = args[1].lower()
+            if sub == "show":
+                reply = await persona_show(self.db)
+            elif sub == "history":
+                reply = await persona_history(self.db)
+            elif sub == "rollback":
+                if len(args) < 3 or not args[2].isdigit():
+                    reply = usage
+                else:
+                    reply = await persona_rollback(self.db, int(args[2]))
+            elif sub == "set":
+                if len(args) < 4:
+                    reply = usage
+                else:
+                    reply = await persona_set(self.db, args[2].lower(), args[3])
+            else:
+                reply = usage
+
+        for part in split_long_message(reply):
             await update.message.reply_text(part, parse_mode="Markdown")
 
     # ─── Free-text Handler ────────────────────────────────────────────────
@@ -460,6 +610,48 @@ class TelegramBot:
             }
             await cbq.answer("🤔 What should I have done instead? Reply below.")
             logger.info("Thumbs-down stored for %s; awaiting correction", message_ref)
+
+    # ─── Phase 6: interactive proposal buttons ────────────────────────────
+
+    @authorized_only
+    @error_handler
+    async def _handle_proposal_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle Approve/Reject on persona/consolidation proposals."""
+        cbq = update.callback_query
+        if not cbq or not cbq.data or not cbq.message:
+            await cbq.answer("This button has expired.")
+            return
+        action, _, token = cbq.data.partition(":")
+        proposal = self._proposals.get(token)
+        if not proposal:
+            await cbq.answer("This proposal has expired.")
+            return
+        del self._proposals[token]
+
+        meta = proposal.get("meta") or {}
+        kind = meta.get("kind")
+        outcome = "approve" if action == "pprove" else "reject"
+
+        if kind == "persona":
+            from services.persona import apply_persona_proposal
+
+            reply = await apply_persona_proposal(
+                self.db, meta.get("version_id"), outcome
+            )
+        else:
+            reply = "✅ Noted — thanks for the feedback!"
+            if outcome == "approve":
+                reply = "👍 Applying your confirmation. Changes take effect on the next turn."
+        try:
+            await cbq.answer("Done!")
+        except Exception:
+            pass
+        try:
+            await cbq.message.reply_text(reply, parse_mode="Markdown")
+        except Exception:
+            await cbq.message.reply_text(reply)
 
     # ─── Helpers ──────────────────────────────────────────────────────────
 

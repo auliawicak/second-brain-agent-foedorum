@@ -249,12 +249,146 @@ async def run_markdown_export(
         path.write_text(_task_month_md(tasks, month), encoding="utf-8")
         stats["tasks_files"] += 1
 
+    # Phase 6 §6.9 — learning-loop artifacts (incremental, fingerprint-gated).
+    pstats = await _export_preferences(db, base)
+    vstats = await _export_persona_versions(db, base)
+    stats.update(await _export_consolidation_log(db, base))
+    stats.update(pstats)
+    stats.update(vstats)
+
     logger.info(
         "Markdown export: %d note(s) written, %d skipped; %d task file(s) written, %d skipped",
         stats["notes"], stats["notes_skipped"],
         stats["tasks_files"], stats["tasks_skipped"],
     )
     return stats
+
+
+# ─── Phase 6 §6.9 — learning-loop vault artifacts ─────────────────────────────
+
+
+def _preferences_fingerprint(prefs: list) -> str:
+    return ",".join(
+        f"{p.id}:{p.last_seen or ''}:{p.confidence:.2f}:{p.evidence_count}"
+        for p in prefs
+    )
+
+
+async def _export_preferences(db: Database, base: Path) -> dict:
+    """Write _meta/preferences.md with the full preference history."""
+    meta_dir = _ensure_dir(base / "_meta")
+    prefs = await db.get_all_preferences()
+    if not prefs:
+        return {"prefs_files": 0, "prefs_skipped": 0}
+
+    live_core = [p for p in prefs if p.superseded_by is None and p.is_core]
+    live_reg = [p for p in prefs if p.superseded_by is None and not p.is_core]
+    superseded = [p for p in prefs if p.superseded_by is not None]
+
+    fingerprint = _preferences_fingerprint([p for p in prefs if p.superseded_by is None])
+    path = meta_dir / "preferences.md"
+    if path.exists() and _file_fingerprint(path) == fingerprint and fingerprint:
+        return {"prefs_files": 0, "prefs_skipped": 1}
+
+    by_id = {p.id: p for p in prefs}
+    lines = [
+        _frontmatter({"title": "Preferences & Habits", "fingerprint": fingerprint}),
+        "",
+        "# Preferences & Habits (learning loop)",
+        "",
+    ]
+
+    def _bullet(p, header: str) -> None:
+        lines.append(
+            f"- **{header}** {p.fact} "
+            f"[{p.category}, conf {p.confidence:.2f}, ev {p.evidence_count}]"
+        )
+
+    if live_core:
+        lines.append("## Core (always kept, always injected)")
+        for p in sorted(live_core, key=lambda x: (-x.confidence, -x.evidence_count)):
+            _bullet(p, "⭐")
+    if live_reg:
+        lines.append("\n## Learning (retrievable by topic)")
+        for p in sorted(live_reg, key=lambda x: (-x.confidence, -x.evidence_count)):
+            _bullet(p, "•")
+    if superseded:
+        lines.append("\n## Superseded history (never overwritten)")
+        for p in sorted(superseded, key=lambda x: x.first_seen or ""):
+            succ = by_id.get(p.superseded_by)
+            note = f" → superseded by #{p.superseded_by}" if succ else "→ dismissed"
+            _bullet(p, note)
+
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return {"prefs_files": 1, "prefs_skipped": 0}
+
+
+async def _export_persona_versions(db: Database, base: Path) -> dict:
+    """Write _meta/persona.md with all operating-principles versions."""
+    meta_dir = _ensure_dir(base / "_meta")
+    versions = await db.get_all_persona_versions()
+    if not versions:
+        return {"persona_files": 0, "persona_skipped": 0}
+
+    latest = versions[-1]
+    fingerprint = f"{latest['id']}:{latest['applied']}"
+    path = meta_dir / "persona.md"
+    if path.exists() and _file_fingerprint(path) == fingerprint and fingerprint:
+        return {"persona_files": 0, "persona_skipped": 1}
+
+    lines = [
+        _frontmatter({"title": "Operating Principles", "fingerprint": fingerprint}),
+        "",
+        "# Operating Principles (versioned)",
+        "",
+        "> Applying a monthly proposal writes a new version here. The active "
+        "version steers every future system prompt.",
+        "",
+    ]
+    for v in versions:
+        state = "active" if v["applied"] else ("rejected" if not v["applied"] else "inactive")
+        lines.append(f"## v{v['version']} — {state} — {v['created_at'][:10]}")
+        lines.append(v["content"].strip())
+        lines.append("")
+
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return {"persona_files": 1, "persona_skipped": 0}
+
+
+async def _export_consolidation_log(db: Database, base: Path) -> dict:
+    """Write _meta/nightly-consolidation.md — append-only, idempotent.
+
+    One dated entry per run; the whole file rewrites each night but contents
+    (one appended line per new day) stay stable across runs.
+    """
+    meta_dir = _ensure_dir(base / "_meta")
+    path = meta_dir / "nightly-consolidation.md"
+    today = datetime.now(Config.TIMEZONE).strftime("%Y-%m-%d")
+
+    entries: list[str] = []
+    if path.exists():
+        text = path.read_text(encoding="utf-8")
+        body_lines = "\n".join(
+            line for line in text.splitlines() if not line.startswith("fingerprint:")
+        ).strip()
+        if body_lines:
+            entries.append(body_lines)
+        if f"## {today}" in text:
+            return {"consolidation_files": 0, "consolidation_skipped": 1}
+
+    prefs = await db.get_all_preferences()
+    live = [p for p in prefs if p.superseded_by is None]
+    entries.append(
+        f"## {today}\n"
+        f"- consolidated: {sum(1 for p in prefs) - len(live)} superseded row(s)\n"
+        f"- live preferences: {len(live)}\n"
+        f"- full current state in _meta/preferences.md"
+    )
+
+    fingerprint = f"daily-{today}"
+    head = f"---\nfingerprint: {fingerprint}\n---\n"
+    path.write_text(head + "\n" + "\n\n".join(entries) + "\n", encoding="utf-8")
+    return {"consolidation_files": 1, "consolidation_skipped": 0}
 
 
 # ─── 3.3 GCS backup ─────────────────────────────────────────────────────────

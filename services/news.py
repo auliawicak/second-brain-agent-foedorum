@@ -85,11 +85,17 @@ GOOGLE_NEWS_TOPICS = {
     "science": "SCIENCE",
 }
 
+# §7.1: the RSS fallback is capped at 2 feeds so the brief stays cheap and
+# bounded (headline + description only, never full bodies).
+MAX_RSS_FEEDS = 2
 
-async def fetch_google_news_rss(topics: list[str] | None = None, limit: int = 5) -> list[dict]:
+
+async def fetch_google_news_rss(
+    topics: list[str] | None = None, limit: int = 5
+) -> list[dict]:
     """Fetch headlines from Google News RSS feeds.
 
-    Used as a fallback when NewsAPI quota is exceeded.
+    Used as a fallback when NewsAPI quota is exceeded (max 2 feeds, §7.1).
 
     Args:
         topics: List of topic names (world, technology, business, science).
@@ -98,7 +104,7 @@ async def fetch_google_news_rss(topics: list[str] | None = None, limit: int = 5)
     Returns:
         List of article dicts.
     """
-    topics = topics or list(GOOGLE_NEWS_TOPICS.keys())
+    topics = topics or list(GOOGLE_NEWS_TOPICS.keys())[:MAX_RSS_FEEDS]
     all_articles: list[dict] = []
 
     async with httpx.AsyncClient(timeout=30) as client:
@@ -159,6 +165,9 @@ async def fetch_all_news() -> str:
         if key not in seen_titles:
             seen_titles.add(key)
             unique_articles.append(article)
+
+    # §7.1: the merged brief only ever consumes a bounded feed (≤10 items).
+    unique_articles = unique_articles[: Config.MAX_NEWS_ARTICLES]
 
     # Format for AI curation
     lines = [f"=== RAW NEWS ARTICLES ({datetime.now().strftime('%Y-%m-%d')}) ===\n"]

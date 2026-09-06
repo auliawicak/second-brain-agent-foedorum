@@ -1,6 +1,6 @@
 # Second Brain Agent 🧠
 
-A 24/7 personal AI assistant that lives in Telegram. It manages your tasks, remembers your notes and ideas, curates your daily news, sets reminders, and thinks through complex problems — all powered by an LLM with tool-calling over the **OpenCode Zen** gateway (**Muse Spark 1.3 Contributor Free** by default, $0).
+A 24/7 personal AI assistant that lives in Telegram. It manages your tasks, remembers your notes and ideas, curates your daily news, sets reminders, reviews your week, and thinks through complex problems — powered by an LLM with tool-calling over a **model pool** (OpenCode Zen by default, $0), with a versioned **persona stored as data** so its tone is editable at runtime.
 
 ---
 
@@ -71,6 +71,19 @@ Free-text chat where the model actively calls tools (tasks, notes, reminders, ne
 ### 🧠 Persistent Memory
 - Conversation history (batched for context)
 - Learned preferences/habits injected into every conversation
+- Corrections/feedback captured inline (👍/👎 buttons) and consolidated into the weekly review
+
+### 🎭 Persona as Data
+Voice, principles, and mode rules live in SQLite as versioned snapshots, not in code. `/persona set voice <text>` changes the next reply with **no restart**, and `/persona rollback <v>` flips back to any prior version. A monthly job proposes principle updates that you Approve/Reject in Telegram.
+
+### 📆 Unified Briefs & Condition Triggers
+- **Morning brief** (06:00): today's tasks, reminders, overdue items + one curated news digest
+- **Evening close-out** (21:00): today's captures/plan for tomorrow
+- **Weekly review** (Fri 17:00): Done vs Slipped + one improvement pattern
+- **Condition checks** (every 15 min): nudges on untouched overdue tasks, capture/execute imbalance, and stale notes — deduplicated once/day
+
+### 🚦 Model Pool & Health
+Multiple free providers with circuit-breaker failover, per-model RPM/RPD budgets, and 401/502-eviction; `/status` shows each model's live state.
 
 ### 🔐 Single-User
 Restricted to your Telegram user ID — unauthorized users are politely rejected.
@@ -83,9 +96,9 @@ Runs as a systemd service on a free Google Cloud VM, or via Docker.
 ## How It Works
 
 1. **Telegram Bot** (`python-telegram-bot`) receives a message (long-polling; no webhooks, no public port needed).
-2. **Second Brain agent** (`agent/brain.py`) sends the conversation + persona + tool descriptions to the OpenCode Zen **Responses API**.
-3. The model may reply with a `{"tool": "...", "args": {...}}` JSON block; the agent executes it against SQLite and feeds the result back — up to 15 tool iterations per turn.
-4. **APScheduler** runs the mandatory jobs (news, agenda, reminder checker) and persists them in a SQLite job store.
+2. **Second Brain agent** (`agent/brain.py`) assembles a system prompt from a core persona + a **persona-data block read fresh from SQLite every turn** (Voice → Principles → Mode rules, §8) + learned preferences + tool descriptions.
+3. The model may reply with a `{"tool": "...", "args": {...}}` JSON block; the agent executes it against SQLite and feeds the result back — up to 15 tool iterations per turn. A router picks the cheapest healthy model per tier with circuit-breaker failover.
+4. **APScheduler** runs 8 persistent jobs — morning brief, evening close-out, weekly review, condition checks, reminder check, nightly consolidation, maintenance, and the monthly persona proposal.
 
 ### Tool Registry
 
@@ -103,6 +116,8 @@ Runs as a systemd service on a free Google Cloud VM, or via Docker.
 | `save_preference` | Persist a learned habit/preference |
 | `get_news` | Fetch raw news for curation |
 
+`/think` uses a separate deep-reasoning tier with its own model.
+
 ---
 
 ## Tech Stack
@@ -110,10 +125,10 @@ Runs as a systemd service on a free Google Cloud VM, or via Docker.
 | Layer | Technology |
 |---|---|
 | Language | Python 3.11+ (async) |
-| AI backend | OpenCode Zen gateway (`https://opencode.ai/zen/v1`), default model `muse-spark-1.3-contributor-free` via the Responses API |
+| AI backend | Model pool — OpenCode Zen gateway (`https://opencode.ai/zen/v1`) by default, extensible to google/groq/openrouter/cerebras/github via env keys; circuit-breaker router in `agent/router.py` |
 | Messaging | `python-telegram-bot` (long polling) |
 | Scheduling | `APScheduler` (AsyncIOScheduler + SQLAlchemy job store) |
-| Storage | `aiosqlite` (SQLite, WAL mode, FTS5 full-text search) |
+| Storage | `aiosqlite` (SQLite, WAL mode, FTS5 full-text search, versioned persona) |
 | Validation | `pydantic` |
 | News | `httpx` + `feedparser` (NewsAPI, Google News RSS) |
 | Config | `python-dotenv` (`.env`) |
@@ -132,25 +147,40 @@ Runs as a systemd service on a free Google Cloud VM, or via Docker.
 ├── docker-compose.yml
 ├── .env.example               # Template for environment variables
 ├── agent/
-│   ├── brain.py               # OpenCode Zen client, retries, tool-call loop
-│   ├── prompts.py             # Personas: main, deep thinking, news curator, tasks
+│   ├── brain.py               # Model client, retries, tool-call loop
+│   ├── router.py              # Model pool routing + failover
+│   ├── health.py              # Per-model circuits, RPM/RPD budgets
+│   ├── registry.py            # Registry of models/providers
+│   ├── context.py             # Prompt assembly + size caps (persona block)
+│   ├── prompts.py             # Core personas
+│   ├── confirmation.py        # Tool-execution confirmation gate
 │   └── tools.py               # Tool implementations + registry
 ├── bot/
 │   ├── telegram_handler.py    # Command handlers + free-text routing
 │   ├── formatters.py          # Markdown escaping, message splitting, /help
+│   ├── feedback.py            # 👍/👎 inline feedback + edit detection
 │   └── middleware.py          # authorized-only + error handling decorators
 ├── services/
-│   ├── scheduler.py           # APScheduler jobs (news, agenda, reminders)
-│   └── news.py                # NewsAPI + Google News RSS aggregator
+│   ├── scheduler.py           # APScheduler jobs (8 persistent jobs, incl. close-out)
+│   ├── brief.py               # Unified morning brief (§7.1)
+│   ├── consolidation.py       # Weekly review + nightly consolidation
+│   ├── triggers.py            # Condition checks (§7.4)
+│   ├── persona.py             # Monthly persona proposal (§6.5)
+│   ├── persona_control.py     # /persona commands (§8.2)
+│   ├── messaging.py           # Proposal sender (Approve/Reject buttons)
+│   ├── news.py                # NewsAPI + Google News RSS aggregator
+│   ├── export.py              # Retention prune + Markdown vault export + GCS backup
+│   └── alerts.py              # Owner alerting on alarms/circuit events
 ├── storage/
-│   ├── database.py            # Async SQLite CRUD + FTS5 + WAL
+│   ├── database.py            # Async SQLite CRUD + FTS5 + WAL + persona
+│   ├── migrations.py          # Numbered schema migrations (1..7)
 │   └── models.py              # Pydantic models & enums
 ├── deploy/
 │   ├── deploy-vm.sh           # GCE free-tier deployment (creates VM)
 │   ├── update-vm.sh           # Push code updates to an existing VM
 │   ├── vm-startup.sh          # GCE startup provisioning script
 │   └── oracle/                # (optional) Oracle Cloud Always Free scripts
-└── tests/
+└── tests/                     # Unit + golden tool-set tests
 ```
 
 ---
@@ -198,10 +228,30 @@ FAST_MODEL=muse-spark-1.3-contributor-free
 DEEP_MODEL=muse-spark-1.3-contributor-free
 MODEL_API_URL=https://opencode.ai/zen/v1
 TIMEZONE=Asia/Jakarta
+
+# Model pool — provider keys (all optional; only present ones are used)
+GOOGLE_AI_API_KEY=
+GROQ_API_KEY=
+CEREBRAS_API_KEY=
+OPENROUTER_API_KEY=
+GITHUB_MODELS_TOKEN=
+
+# Unified brief / close-out / weekly review (Phase 7)
+BRIEF_HOUR=6
+BRIEF_MINUTE=0
+CLOSEOUT_HOUR=21
+CLOSEOUT_MINUTE=0
+REVIEW_DAY=fri
+REVIEW_HOUR=17
+REVIEW_MINUTE=0
+
+# Legacy slots (kept for backward compatibility; NEWS_DELIVERY_HOUR also
+# seeds BRIEF_HOUR when unset)
 NEWS_DELIVERY_HOUR=6
 NEWS_DELIVERY_MINUTE=0
 AGENDA_DELIVERY_HOUR=6
 AGENDA_DELIVERY_MINUTE=30
+
 DATABASE_PATH=./data/second_brain.db
 LOG_LEVEL=INFO
 ```
@@ -302,7 +352,11 @@ Any 24/7 host that can run Docker (a small VPS, a Raspberry Pi, etc.) works. Mou
 | `/news` | Curated news digest | — |
 | `/remind` | Set a reminder | `/remind tomorrow 9am call dentist` |
 | `/think` | Deep reasoning | `/think pros/cons of microservices` |
-| `/status` | System status (models, counts, schedule) | — |
+| `/status` | System status (models, counts, DB size, uptime) | — |
+| `/persona show` | Show the active persona | — |
+| `/persona set voice\|principles\|mode_rules <text>` | Edit a persona layer (live, no restart) | `/persona set voice Formal British English` |
+| `/persona history` | List persona versions | — |
+| `/persona rollback <v>` | Revert to a persona version | `/persona rollback 1` |
 
 ### Natural Language
 
@@ -322,11 +376,16 @@ The agent will call the right tools automatically.
 
 | Job | Schedule | What it does |
 |---|---|---|
-| Morning News | Daily `06:00` (configured) | Fetches news, AI-curates a digest, saves + sends |
-| Daily Agenda | Daily `06:30` (configured) | Sends today's tasks + active reminders |
-| Reminder Checker | Every minute | Fires due reminders; advances recurring ones to the next cron occurrence |
+| Morning Brief | Daily `BRIEF_HOUR:00` (default 06:00) | Unified brief: today's tasks, reminders, overdue + one curated news digest (§7.1) |
+| Evening Close-out | Daily `CLOSEOUT_HOUR:00` (default 21:00) | Captures made today + a one-line plan for tomorrow (§7.2) |
+| Weekly Review | `REVIEW_DAY` `REVIEW_HOUR` (default Fri 17:00) | Done vs Slipped + one improvement pattern, from corrections/preferences (§7.3) |
+| Condition Checks | Every 15 minutes | Nudges on untouched overdue tasks, capture/execute imbalance, stale notes — deduplicated once/day per entity (§7.4) |
+| Reminder Check | Every minute | Fires due reminders; advances recurring ones to the next cron occurrence; also refreshes the heartbeat |
+| Nightly Consolidation | Daily 00:15 | Consolidates unprocessed corrections into aggregated preferences (§5) |
+| Maintenance | Daily 03:00 | Retention pruning, Markdown vault export, GCS backup |
+| Persona Proposal | Monthly (1st, 04:00) | Drafts updated operating principles → send for Approve/Reject (§6.5) |
 
-Recurring reminders (e.g. prayer times) are advanced automatically via `_next_cron_occurrence()` so one-shot logic never spams.
+Exactly 8 jobs; the scheduler store is persisted and old jobs are purged on boot.
 
 ---
 
@@ -336,7 +395,7 @@ Everything lives in `data/` at the project root:
 
 | File | Contents |
 |---|---|
-| `second_brain.db` | Tasks, notes, reminders, conversations, digests, preferences (WAL mode, FTS5) |
+| `second_brain.db` | Tasks, notes, reminders, conversations, digests, feedback, preferences, corrections, `persona_versions`, `persona` (versioned voice/principles/mode-rules), `nudge_log` (WAL mode, FTS5) |
 | `scheduler_jobs.db` | APScheduler's persistent job store |
 | `agent_state/` | Reserved for future agent state |
 
@@ -377,11 +436,13 @@ Back them up by copying the directory while the bot is stopped (or use `sqlite3 
 
 ## Roadmap
 
+- [x] Backups / export to Markdown (nightly maintenance + GCS)
+- [x] Learning loop (corrections → consolidated preferences → weekly review)
+- [x] Persona as data (`/persona`, monthly proposals)
+- [ ] Voice-note and image input
 - [ ] Webhook mode (no polling) for non-VM hosts
-- [ ] Note editing/deletion commands
-- [ ] Task editing (reschedule, re-prioritize)
 - [ ] Web UI dashboard for notes & tasks
-- [ ] Backups / export to Markdown
+- [ ] Note/task editing commands
 
 ---
 

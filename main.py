@@ -100,7 +100,7 @@ async def main() -> None:
 
     from services.scheduler import create_scheduler, inject_dependencies, check_downtime_on_startup
 
-    inject_dependencies(brain, db, telegram_bot.send_message)
+    inject_dependencies(brain, db, telegram_bot.send_message, telegram_bot.send_proposal)
     scheduler = create_scheduler()
 
     # Downtime alert (uses direct db handle; safe before injection timing)

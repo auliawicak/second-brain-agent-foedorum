@@ -12,6 +12,30 @@ from __future__ import annotations
 from config import Config
 
 
+def assemble_persona_block(
+    *,
+    voice: str | None,
+    principles: str | None,
+    mode_rules: str | None,
+) -> str:
+    """Assemble the persona layer into a system-prompt section (§8.1).
+
+    Ordered Voice → Principles → Mode rules, lowest-leverage imperative
+    guidance first so the more prescriptive rules read last (closest to
+    where the model attends). Blank layers are skipped; if nothing is
+    supplied it returns an empty string so `build_system_prompt` can skip
+    the section entirely.
+    """
+    parts: list[str] = []
+    if voice and voice.strip():
+        parts.append(f"## Voice\n{voice.strip()}")
+    if principles and principles.strip():
+        parts.append(f"## Principles\n{principles.strip()}")
+    if mode_rules and mode_rules.strip():
+        parts.append(f"## Mode Rules\n{mode_rules.strip()}")
+    return "\n\n".join(parts)
+
+
 def build_system_prompt(
     core: str,
     *,

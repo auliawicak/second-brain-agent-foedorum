@@ -63,6 +63,8 @@ def test_confirming_tools_are_the_mutators() -> None:
         "save_note",
         "set_reminder",
         "save_preference",
+        "remember_fact",
+        "record_correction",
     }
 
 
