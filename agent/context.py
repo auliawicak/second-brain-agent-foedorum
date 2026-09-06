@@ -17,11 +17,35 @@ def build_system_prompt(
     *,
     sections: list[str] | None = None,
 ) -> str:
-    """Assemble the system prompt. `sections` are appended in order."""
+    """Assemble the system prompt. `sections` are appended in order.
+
+    The assembled block is hard-capped at `MAX_PROMPT_CHARS` so the persona
+    itself can never overflow the prompt budget (Phase 3 §3.4 'persona
+    assembly is capped'). Trailing sections are dropped first; the core
+    persona is always kept.
+    """
     parts = [core]
     if sections:
         parts.extend(s for s in sections if s)
-    return "\n".join(parts)
+    prompt = "\n".join(parts)
+    if len(prompt) <= Config.MAX_PROMPT_CHARS:
+        return prompt
+
+    # Drop trailing sections until the core (habitually the largest block)
+    # plus a single remaining section fits.
+    budget = Config.MAX_PROMPT_CHARS - len(core) - 2  # "\n" separators
+    if budget <= 0:
+        return core[: Config.MAX_PROMPT_CHARS]
+    kept = [core]
+    used = len(core)
+    for s in (sections or []):
+        if not s:
+            continue
+        if used + len(s) + 2 > Config.MAX_PROMPT_CHARS:
+            break
+        kept.append(s)
+        used += len(s) + 2
+    return "\n".join(kept)
 
 
 def cap_preferences(prefs_texts: list[str]) -> list[str]:

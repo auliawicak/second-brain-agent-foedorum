@@ -309,6 +309,63 @@ class Database:
         rows = await cursor.fetchall()
         return [ConversationEntry(**dict(row)) for row in reversed(list(rows))]
 
+    # ─── Data hygiene (Phase 3) ──────────────────────────────────────────
+
+    async def get_conversations_before(self, before_iso: str) -> list[ConversationEntry]:
+        """Get conversation rows older than `before_iso` (newest first)."""
+        cursor = await self.db.execute(
+            """SELECT * FROM conversations
+               WHERE timestamp < ? ORDER BY timestamp ASC""",
+            (before_iso,),
+        )
+        rows = await cursor.fetchall()
+        return [ConversationEntry(**dict(row)) for row in rows]
+
+    async def delete_conversations_before(self, before_iso: str) -> int:
+        """Delete conversation rows older than `before_iso`. Returns rowcount."""
+        cursor = await self.db.execute(
+            "DELETE FROM conversations WHERE timestamp < ?", (before_iso,)
+        )
+        await self.db.commit()
+        return cursor.rowcount
+
+    async def get_all_notes(self) -> list[Note]:
+        """Get every note (for the markdown vault export)."""
+        cursor = await self.db.execute("SELECT * FROM notes ORDER BY created_at ASC")
+        rows = await cursor.fetchall()
+        results = []
+        for row in rows:
+            data = dict(row)
+            data["tags"] = json.loads(data["tags"]) if isinstance(data["tags"], str) else data["tags"]
+            results.append(Note(**data))
+        return results
+
+    async def get_all_tasks(self) -> list[Task]:
+        """Get every task (for the markdown vault export)."""
+        cursor = await self.db.execute("SELECT * FROM tasks ORDER BY created_at ASC")
+        rows = await cursor.fetchall()
+        return [Task(**dict(row)) for row in rows]
+
+    async def get_all_conversations(self) -> list[ConversationEntry]:
+        """Get every conversation row (for the markdown vault export)."""
+        cursor = await self.db.execute("SELECT * FROM conversations ORDER BY timestamp ASC")
+        rows = await cursor.fetchall()
+        return [ConversationEntry(**dict(row)) for row in rows]
+
+    async def checkpoint_truncate(self) -> None:
+        """Run PRAGMA wal_checkpoint(TRUNCATE) to compact the WAL."""
+        try:
+            cur = await self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            await cur.fetchall()  # consume so no statement stays open (VACUUM-safe)
+            logger.debug("WAL checkpoint (TRUNCATE) ran.")
+        except Exception:
+            logger.exception("WAL checkpoint (TRUNCATE) failed.")
+
+    async def vacuum(self) -> None:
+        """Reclaim freed pages (run on the first Sunday of each month)."""
+        await self.db.execute("VACUUM")
+        logger.info("VACUUM completed.")
+
     # ─── Daily Digests ────────────────────────────────────────────────────
 
     async def save_digest(self, date: str, content: str) -> None:

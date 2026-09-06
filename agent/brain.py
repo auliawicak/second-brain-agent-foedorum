@@ -136,7 +136,12 @@ class SecondBrain:
         """Generate a reply for `tier`, walking candidates with failover.
 
         Returns the text, or the FALLBACK_MESSAGE when every candidate fails.
+
+        Phase 3 §3.4: every model call path is capped here — the assembled
+        messages are forced to fit `MAX_PROMPT_CHARS` beside the system block
+        (oldest messages dropped first, the system block never dropped).
         """
+        messages = build_context(messages, system_instruction)
         last_error: Exception | None = None
         exclude: set[str] = set()
         prompt_bytes = estimate_prompt_bytes(messages, system_instruction)

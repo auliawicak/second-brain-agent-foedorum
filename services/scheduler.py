@@ -168,6 +168,41 @@ async def heartbeat_job() -> None:
     await _db.update_heartbeat()
 
 
+# ─── Phase 3 — data hygiene (nightly) ───────────────────────────────────────
+
+
+@alert_on_error
+async def retention_job() -> None:
+    """Nightly (03:00): export old conversations and prune them."""
+    if _db is None:
+        raise RuntimeError("Database not injected for retention job.")
+    from services.export import run_retention
+
+    await run_retention(_db)
+
+
+@alert_on_error
+async def markdown_export_job() -> None:
+    """Nightly (03:15): write the Obsidian vault (notes + tasks, incremental)."""
+    if _db is None:
+        raise RuntimeError("Database not injected for markdown export job.")
+    from services.export import run_markdown_export
+
+    await run_markdown_export(_db)
+
+
+@alert_on_error
+async def backup_job() -> None:
+    """Nightly (03:30): hot-copy DB + vault to BACKUP_BUCKET (or skip if unset)."""
+    if _db is None:
+        raise RuntimeError("Database not injected for backup job.")
+    from services.export import run_backup
+
+    result = await run_backup(_db)
+    if result.get("skipped"):
+        logger.info("Backup skipped (BACKUP_BUCKET unset).")
+
+
 async def check_downtime_on_startup(db) -> None:
     """Alert the owner if the agent appears to have been down > 2 hours."""
     last_seen = await db.get_heartbeat()
@@ -268,6 +303,35 @@ def create_scheduler() -> AsyncIOScheduler:
         id="heartbeat",
         name="Heartbeat",
         replace_existing=True,
+    )
+
+    # Phase 3 — data hygiene, nightly (Asia/Jakarta)
+    scheduler.add_job(
+        retention_job,
+        trigger="cron",
+        hour=3, minute=0,
+        id="retention",
+        name="Conversation Retention (export + prune)",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        markdown_export_job,
+        trigger="cron",
+        hour=3, minute=15,
+        id="markdown_export",
+        name="Markdown Vault Export",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        backup_job,
+        trigger="cron",
+        hour=3, minute=30,
+        id="backup",
+        name="GCS Backup",
+        replace_existing=True,
+        misfire_grace_time=3600,
     )
 
     logger.info(

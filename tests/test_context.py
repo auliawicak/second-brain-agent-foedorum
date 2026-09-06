@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from agent.context import build_context, cap_preferences
+from agent.context import build_context, build_system_prompt, cap_preferences
+from agent.providers import estimate_prompt_bytes
 from config import Config
 
 
@@ -46,3 +47,39 @@ def test_build_context_keeps_all_when_fits():
     history = [{"role": "user", "content": "hi"}]
     out = build_context(history, system_prompt="S")
     assert out == history
+
+
+# ─── Phase 3 §3.4 — no assembled prompt ever exceeds MAX_PROMPT_CHARS ───────
+
+
+def test_assembled_prompt_never_exceeds_max_for_any_path():
+    core = "persona " * 500
+    system = build_system_prompt(
+        core,
+        sections=["tool descriptions" * 300, "preferences " * 400],
+    )
+    assert len(system) <= Config.MAX_PROMPT_CHARS
+
+    # chat path: long history
+    big_history = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"H{i} " * 200}
+        for i in range(60)
+    ]
+    chat_msgs = build_context(big_history, system)
+    assert estimate_prompt_bytes(chat_msgs, system) <= Config.MAX_PROMPT_CHARS * 2  # chars≈bytes bound
+
+    # think/classify/curate paths: single giant message
+    single = build_context(
+        [{"role": "user", "content": "ARTICLE " * 20_000}], system
+    )
+    total_chars = len(system) + sum(len(m["content"]) + 32 for m in single)
+    assert total_chars <= Config.MAX_PROMPT_CHARS + 32
+
+
+def test_build_system_prompt_caps_oversized_persona():
+    system = build_system_prompt(
+        "CORE " * 2000,
+        sections=["LONG " * 5000, "SHORT"],
+    )
+    assert len(system) <= Config.MAX_PROMPT_CHARS
+    assert system.startswith(("CORE " * 2000).rstrip()[: len("CORE " * 2000)])

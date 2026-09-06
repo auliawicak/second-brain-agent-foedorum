@@ -56,6 +56,17 @@ class Config:
         os.environ.get("DATABASE_PATH", str(PROJECT_DIR / "data" / "second_brain.db"))
     )
     AGENT_SAVE_DIR: Path = PROJECT_DIR / "data" / "agent_state"
+    EXPORT_DIR: Path = PROJECT_DIR / "data" / "export"
+
+    # --- Data hygiene (Phase 3) ---
+    # Conversation rows older than this are exported and pruned nightly.
+    RETENTION_DAYS: int = int(os.environ.get("RETENTION_DAYS", "60"))
+    # GCS bucket for nightly backups. Same-region (us-central1) egress is
+    # free. Empty → the backup job is skipped cleanly.
+    BACKUP_BUCKET: str = os.environ.get("BACKUP_BUCKET", "")
+    # Hard wall-clock budget (seconds) for each backup sub-step, so a wedged
+    # copy or upload fails with an alert instead of hanging the job forever.
+    BACKUP_TIMEOUT_SECONDS: int = int(os.environ.get("BACKUP_TIMEOUT_SECONDS", "300"))
 
     # --- Logging ---
     LOG_LEVEL: str = os.environ.get("LOG_LEVEL", "INFO")
