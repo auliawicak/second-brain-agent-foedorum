@@ -185,7 +185,8 @@ class TelegramBot:
         """Handle /tasks — show pending tasks via the agent."""
         await update.message.reply_text("📋 Fetching your tasks...")
         response = await self.brain.chat(
-            "List all my pending tasks. Use the list_tasks tool with status='pending'."
+            "List all my pending tasks. Use the list_tasks tool with status='pending'.",
+            confirmed=True,
         )
         await self._reply_chat(update, response)
 
@@ -204,7 +205,8 @@ class TelegramBot:
 
         response = await self.brain.chat(
             f"Create a new task for me: {text}. "
-            "Use the add_task tool. Infer priority and due date if mentioned."
+            "Use the add_task tool. Infer priority and due date if mentioned.",
+            confirmed=True,
         )
         await self._reply_chat(update, response)
 
@@ -221,7 +223,8 @@ class TelegramBot:
             return
 
         response = await self.brain.chat(
-            f"Mark task #{text} as completed. Use the complete_task tool."
+            f"Mark task #{text} as completed. Use the complete_task tool.",
+            confirmed=True,
         )
         await self._reply_chat(update, response)
 
@@ -230,7 +233,8 @@ class TelegramBot:
     async def _cmd_notes(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /notes — show recent notes."""
         response = await self.brain.chat(
-            "Show my recent notes. Use the get_recent_notes tool."
+            "Show my recent notes. Use the get_recent_notes tool.",
+            confirmed=True,
         )
         await self._reply_chat(update, response)
 
@@ -249,7 +253,8 @@ class TelegramBot:
 
         response = await self.brain.chat(
             f"Save this note for me: {text}. "
-            "Use the save_note tool. Infer appropriate tags and category."
+            "Use the save_note tool. Infer appropriate tags and category.",
+            confirmed=True,
         )
         await self._reply_chat(update, response)
 
@@ -266,7 +271,8 @@ class TelegramBot:
             return
 
         response = await self.brain.chat(
-            f"Search my notes for: {query}. Use the search_notes tool."
+            f"Search my notes for: {query}. Use the search_notes tool.",
+            confirmed=True,
         )
         await self._reply_chat(update, response)
 
@@ -294,7 +300,8 @@ class TelegramBot:
     async def _cmd_daily(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /daily — today's agenda."""
         response = await self.brain.chat(
-            "Show me today's agenda. Use the get_today_agenda tool."
+            "Show me today's agenda. Use the get_today_agenda tool.",
+            confirmed=True,
         )
         await self._reply_chat(update, response)
 
@@ -315,7 +322,8 @@ class TelegramBot:
         response = await self.brain.chat(
             f"Set a reminder for me: {text}. "
             "Use set_reminder with the appropriate ISO datetime. "
-            "You already know the current time from the system prompt."
+            "You already know the current time from the system prompt.",
+            confirmed=True,
         )
         await self._reply_chat(update, response)
 

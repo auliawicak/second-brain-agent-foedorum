@@ -122,7 +122,7 @@ async def test_chat_returns_chatresult(db: Database, monkeypatch) -> None:
 
     monkeypatch.setattr(SecondBrain, "_generate", fake_generate)
 
-    result = await brain.chat("please add walk dog task")
+    result = await brain.chat("please add walk dog task", confirmed=True)
     assert isinstance(result, ChatResult)
     assert result.executed_tool is True
     assert result.tool == "add_task"

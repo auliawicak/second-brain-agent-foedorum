@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import time
 from dataclasses import dataclass
 
 from agent.context import build_context, build_system_prompt, cap_preferences
@@ -24,6 +25,12 @@ from agent.providers import (
     call_model,
     estimate_prompt_bytes,
     shutdown_client,
+)
+from agent.confirmation import (
+    CONFIRMATION_TTL_SECONDS,
+    CONFIRMING_TOOLS,
+    confirmation_question,
+    is_confirmation,
 )
 from agent.prompts import MAIN_PERSONA, DEEP_THINKING_PROMPT, NEWS_CURATOR_PROMPT
 from agent.router import TIER_MAP, route
@@ -70,6 +77,7 @@ TOOL_POLICY = """
 ```
 - Do not describe or acknowledge in prose first — just the JSON block.
 - For pure questions that need no action, answer normally in prose.
+- Mutating tools (add_task, complete_task, save_note, set_reminder, save_preference) are confirmed with the user by the system before execution — you do NOT need to ask permission yourself, and you must NOT claim you performed an action until you receive a "Tool result:" message.
 - After you receive a "Tool result:" message, reply to the user in short prose summarizing the outcome.
 """
 
@@ -93,6 +101,8 @@ class SecondBrain:
         self._chat_history: list[dict] = []
         self._last_model = ("", "")
         self.last_chat: ChatResult | None = None
+        self._pending_confirmation: dict | None = None  # tool call awaiting user yes
+        self._turn_confirmed = False
 
         set_database(db)
         self.health = ModelHealth(db)
@@ -201,11 +211,16 @@ class SecondBrain:
             logger.error("Tool execution error for %s: %s", tool_name, e)
             return f"Error executing tool '{tool_name}': {e}"
 
-    async def chat(self, message: str) -> ChatResult:
+    async def chat(self, message: str, confirmed: bool = False) -> ChatResult:
         """Send a message through the tool loop (tools tier).
 
         Returns a ChatResult carrying the final text plus feedback metadata
         (executed tool, serving model, tier) for Phase 2.
+
+        `confirmed=True` (slash commands) skips the confirmation gate for
+        mutating tools — the user already stated explicit intent. Free-text
+        messages run the gate: a proposed mutating tool first returns a
+        confirmation question and waits for the user to say yes.
         """
         await self.db.log_conversation("user", message)
 
@@ -232,13 +247,41 @@ class SecondBrain:
         if len(self._chat_history) > 40:
             self._chat_history = self._chat_history[-40:]
 
+        # ── Confirmation gate ─────────────────────────────────────────────
+        self._turn_confirmed = confirmed
+        resume: tuple[str, dict] | None = None
+        pending = self._pending_confirmation
+        self._pending_confirmation = None
+        if pending and not confirmed and is_confirmation(message):
+            age = time.time() - pending.get("ts", 0)
+            if age <= CONFIRMATION_TTL_SECONDS:
+                resume = (pending["tool"], pending["args"])
+                self._turn_confirmed = True
+        # Any other (or expired) pending is dropped here.
+
+        tool_result: str | None = None
+        last_tool: str | None = None
+        last_tool_args: dict | None = None
+        last_tool_result: str | None = None
+
+        # An affirmative reply to a pending question executes it directly —
+        # no model round-trip needed for the confirmation itself.
+        if resume:
+            last_tool, last_tool_args = resume
+            tool_result = await self._execute_tool(last_tool, last_tool_args)
+            last_tool_result = tool_result
+            logger.info("Executing confirmed tool %s %s", last_tool, last_tool_args)
+            self._chat_history.append(
+                {"role": "assistant", "content": "Action confirmed by the user."}
+            )
+            self._chat_history.append(
+                {"role": "user", "content": f"Tool result:\n{tool_result}"}
+            )
+
         max_iterations = 15
         iteration = 0
         response_text = ""
         strict_retried = False
-        last_tool: str | None = None
-        last_tool_args: dict | None = None
-        last_tool_result: str | None = None
 
         while iteration < max_iterations:
             iteration += 1
@@ -246,6 +289,7 @@ class SecondBrain:
             if iteration > 1:
                 await asyncio.sleep(2)
 
+            tool_result = None
             current_response_text = await self._generate(
                 tier=TIER_MAP["chat"],
                 messages=build_context(self._chat_history, system_prompt),
@@ -268,9 +312,31 @@ class SecondBrain:
                 )
                 parsed = parse_tool_call(current_response_text)
 
-            tool_result = None
             if parsed:
                 tool_name, args = parsed
+
+                if not self._turn_confirmed and tool_name in CONFIRMING_TOOLS:
+                    # Ask before mutating: hold the call, reply with a question.
+                    self._pending_confirmation = {
+                        "tool": tool_name,
+                        "args": args,
+                        "ts": time.time(),
+                    }
+                    question = confirmation_question(tool_name, args)
+                    response_text = question or (
+                        f"Shall I go ahead with {tool_name}?"
+                    )
+                    logger.info(
+                        "Awaiting confirmation before %s %s", tool_name, args
+                    )
+                    self._chat_history.append(
+                        {"role": "assistant", "content": current_response_text}
+                    )
+                    self._chat_history.append(
+                        {"role": "user", "content": "Awaiting user confirmation."}
+                    )
+                    break
+
                 tool_result = await self._execute_tool(tool_name, args)
                 last_tool = tool_name
                 last_tool_args = args
