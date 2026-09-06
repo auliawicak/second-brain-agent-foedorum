@@ -48,6 +48,12 @@ _GITHUB_URL = "https://models.inference.ai.azure.com"
 
 DEFAULT_REGISTRY: list[ModelSpec] = [
     # ── zen (existing key) — primary, free ─────────────────────────────────
+    # Per owner decision (2026-09-06): muse is the ONLY active model while
+    # no external provider key exists. The zen chat_completions free models
+    # (big-pickle, mimo, ling, nemotron) were golden-tested and removed:
+    # big-pickle is disabled on this plan, the rest score well below the 90%
+    # GA bar for the tools tier. External models below stay listed (inert
+    # without their API key) so the 3-provider GA can be satisfied later.
     ModelSpec(
         id="muse-spark-1.3-contributor-free",
         provider="zen",
@@ -56,54 +62,6 @@ DEFAULT_REGISTRY: list[ModelSpec] = [
         api_key_env="OPENCODE_ZEN_API_KEY",
         tiers=frozenset({"classify", "chat", "tools", "deep"}),
         priority=0,
-        rpm=None,
-        rpd=None,
-        max_output_tokens=8192,
-    ),
-    ModelSpec(
-        id="big-pickle",
-        provider="zen",
-        base_url=_ZEN_URL,
-        api_style="chat_completions",
-        api_key_env="OPENCODE_ZEN_API_KEY",
-        tiers=frozenset({"classify", "chat"}),
-        priority=5,
-        rpm=None,
-        rpd=None,
-        max_output_tokens=8192,
-    ),
-    ModelSpec(
-        id="mimo-v2.5-free",
-        provider="zen",
-        base_url=_ZEN_URL,
-        api_style="chat_completions",
-        api_key_env="OPENCODE_ZEN_API_KEY",
-        tiers=frozenset({"classify", "chat"}),
-        priority=5,
-        rpm=None,
-        rpd=None,
-        max_output_tokens=8192,
-    ),
-    ModelSpec(
-        id="ling-3.0-flash-fin-free",
-        provider="zen",
-        base_url=_ZEN_URL,
-        api_style="chat_completions",
-        api_key_env="OPENCODE_ZEN_API_KEY",
-        tiers=frozenset({"classify", "chat"}),
-        priority=6,
-        rpm=None,
-        rpd=None,
-        max_output_tokens=8192,
-    ),
-    ModelSpec(
-        id="nemotron-3.5-lightning-free",
-        provider="zen",
-        base_url=_ZEN_URL,
-        api_style="chat_completions",
-        api_key_env="OPENCODE_ZEN_API_KEY",
-        tiers=frozenset({"classify", "chat"}),
-        priority=8,
         rpm=None,
         rpd=None,
         max_output_tokens=8192,
