@@ -95,11 +95,14 @@ async def _call_responses(spec: ModelSpec, messages: list[dict], system_instruct
     }
     if not payload.get("instructions"):
         payload.pop("instructions")
-    resp = await shared_client().post(
-        f"{spec.base_url.rstrip('/')}/responses",
-        headers={"Authorization": f"Bearer {_api_key_of(spec)}"},
-        json=payload,
-    )
+    try:
+        resp = await shared_client().post(
+            f"{spec.base_url.rstrip('/')}/responses",
+            headers={"Authorization": f"Bearer {_api_key_of(spec)}"},
+            json=payload,
+        )
+    except httpx.HTTPError as e:
+        raise ProviderError(f"{spec.provider}/{spec.id} request failed: {e}") from e
     _raise_for_response(resp, spec)
     data = resp.json()
     text = _extract_responses_text(data)
@@ -136,14 +139,17 @@ async def _call_chat(spec: ModelSpec, messages: list[dict], system_instruction: 
         "max_tokens": max_tokens,
         "stream": False,
     }
-    resp = await shared_client().post(
-        f"{spec.base_url.rstrip('/')}/chat/completions",
-        headers={
-            "Authorization": f"Bearer {_api_key_of(spec)}",
-            "Content-Type": "application/json",
-        },
-        json=payload,
-    )
+    try:
+        resp = await shared_client().post(
+            f"{spec.base_url.rstrip('/')}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {_api_key_of(spec)}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+    except httpx.HTTPError as e:
+        raise ProviderError(f"{spec.provider}/{spec.id} request failed: {e}") from e
     _raise_for_response(resp, spec)
     data = resp.json()
     text = ""
