@@ -44,7 +44,15 @@ def _chat_payload(
     text: str,
     prompt_tokens: int,
     completion_tokens: int,
+    *,
+    tool_calls: list[dict] | None = None,
+    finish_reason: str | None = None,
 ) -> dict[str, Any]:
+    message: dict[str, Any] = {"role": "assistant"}
+    if text:
+        message["content"] = text
+    if tool_calls:
+        message["tool_calls"] = tool_calls
     return {
         "id": f"chatcmpl-{uuid4().hex[:24]}",
         "object": "chat.completion",
@@ -53,8 +61,8 @@ def _chat_payload(
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": text},
-                "finish_reason": "stop",
+                "message": message,
+                "finish_reason": finish_reason or ("tool_calls" if tool_calls else "stop"),
             }
         ],
         "usage": {
@@ -225,14 +233,25 @@ class OpenAICompatProxy:
         system_instruction, chat_messages = self._split_system(messages)
         max_tokens = payload.get("max_tokens") or payload.get("max_completion_tokens")
         temperature = payload.get("temperature", 0.7)
+        tools = payload.get("tools")
+        tool_choice = payload.get("tool_choice")
 
         try:
             async with self._sem:
-                text, model_id, prompt_tokens, completion_tokens = await self._generate_pool(
+                (
+                    text,
+                    tool_calls,
+                    finish_reason,
+                    model_id,
+                    prompt_tokens,
+                    completion_tokens,
+                ) = await self._generate_pool(
                     chat_messages,
                     system_instruction,
                     max_tokens=max_tokens,
                     temperature=temperature,
+                    tools=tools,
+                    tool_choice=tool_choice,
                 )
         except ProviderError as e:
             status = 429 if e.status == 429 else 500
@@ -241,13 +260,15 @@ class OpenAICompatProxy:
             logger.exception("pool generation failed")
             return 500, {"error": {"message": str(e)[:300], "type": "pool_error"}}
 
-        if not text:
+        if not text and not tool_calls:
             text = ""  # let the client treat it as an empty assistant turn
         return 200, _chat_payload(
             model_id or payload.get("model") or MODEL_NAME,
             text,
             prompt_tokens,
             completion_tokens,
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
         )
 
     def _split_system(self, messages: list[dict]) -> tuple[str, list[dict]]:
@@ -257,12 +278,16 @@ class OpenAICompatProxy:
         for msg in messages:
             role = msg.get("role", "user")
             content = msg.get("content")
-            if content is None:
-                content = ""
-            if role == "system":
-                system_parts.append(str(content))
-            elif role in ("user", "assistant", "tool", "developer"):
-                chat.append({"role": role, "content": str(content)})
+            if role in ("system", "developer"):
+                if content is not None:
+                    system_parts.append(str(content))
+            elif role in ("user", "assistant", "tool"):
+                entry: dict[str, Any] = {"role": role}
+                if content is not None and content != "":
+                    entry["content"] = content
+                if msg.get("tool_calls"):
+                    entry["tool_calls"] = msg["tool_calls"]
+                chat.append(entry)
         system_instruction = "\n".join(
             p for p in system_parts if p
         ).strip()[: Config.MAX_PROMPT_CHARS]
@@ -275,7 +300,9 @@ class OpenAICompatProxy:
         *,
         max_tokens: int | None = None,
         temperature: float = 0.7,
-    ) -> tuple[str, str, int, int]:
+        tools: list | None = None,
+        tool_choice: Any | None = None,
+    ) -> tuple[str, list[dict] | None, str | None, str, int, int]:
         """One pooled call with failover, retries, and breaker/usage tracking.
 
         Mirrors `SecondBrain._generate` so the free-tier economics stay intact.
@@ -297,11 +324,20 @@ class OpenAICompatProxy:
                         system_instruction,
                         temperature=temperature,
                         max_tokens=max_tokens,
+                        tools=tools,
+                        tool_choice=tool_choice,
                     )
                     est_out = max(1, len(result.text) // 4)
                     await self._usage.record_call(cand.id, prompt_bytes, est_out)
                     await self._health.record_success(cand.id)
-                    return result.text, cand.id, prompt_bytes, est_out
+                    return (
+                        result.text,
+                        result.tool_calls,
+                        result.finish_reason,
+                        cand.id,
+                        prompt_bytes,
+                        est_out,
+                    )
                 except ProviderError as e:
                     last_error = e
                     await self._usage.record_call(cand.id, prompt_bytes, 0, errored=True)
@@ -319,7 +355,7 @@ class OpenAICompatProxy:
 
     async def smoke_check(self) -> str:
         """One tiny call to prove the pool works before the gateway attaches."""
-        text, model_id, _, _ = await self._generate_pool(
+        text, _tool_calls, _fr, model_id, _, _ = await self._generate_pool(
             [{"role": "user", "content": "Reply with exactly: ok"}],
             "You are a smoke test.",
         )

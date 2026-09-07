@@ -47,29 +47,35 @@ class TestPayloadHelpers:
         assert body["choices"][0]["finish_reason"] == "stop"
         assert body["usage"]["total_tokens"] == 8
 
-    def test_split_system(self, proxy: OpenAICompatProxy) -> None:
+    def test_chat_payload_with_tool_calls(self) -> None:
+        tcs = [{"id": "c1", "type": "function",
+                "function": {"name": "x", "arguments": "{}"}}]
+        body = _chat_payload(
+            "muse-zen", "", 5, 3, tool_calls=tcs, finish_reason="tool_calls"
+        )
+        msg = body["choices"][0]["message"]
+        assert msg == {"role": "assistant", "tool_calls": tcs}
+        assert body["choices"][0]["finish_reason"] == "tool_calls"
+
+    def test_split_system_preserves_tool_calls(self, proxy: OpenAICompatProxy) -> None:
         instruction, chat = proxy._split_system(
             [
                 {"role": "system", "content": "You are strict."},
                 {"role": "user", "content": "hello"},
-                {"role": "assistant", "content": "hi"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{"id": "c9", "type": "function",
+                                    "function": {"name": "t", "arguments": "{}"}}],
+                },
                 {"role": "tool", "content": '{"ok":true}'},
-                {"role": "developer", "content": "extra"},
             ]
         )
         assert instruction == "You are strict."
-        assert [m["role"] for m in chat] == ["user", "assistant", "tool", "developer"]
-
-    def test_split_system_multiple_system_messages(self, proxy: OpenAICompatProxy) -> None:
-        instruction, chat = proxy._split_system(
-            [
-                {"role": "system", "content": "A"},
-                {"role": "system", "content": "B"},
-                {"role": "user", "content": "x"},
-            ]
-        )
-        assert instruction == "A\nB"
-        assert len(chat) == 1
+        assert chat[0] == {"role": "user", "content": "hello"}
+        assert chat[1]["tool_calls"][0]["id"] == "c9"
+        assert "content" not in chat[1]
+        assert chat[2] == {"role": "tool", "content": '{"ok":true}'}
 
 
 class TestHttpEndpoints:
@@ -83,7 +89,7 @@ class TestHttpEndpoints:
         self, proxy: OpenAICompatProxy, monkeypatch
     ) -> None:
         async def fake_generate(messages, system_instruction, **kwargs):
-            return ("Hello there", "muse-zen", 100, 20)
+            return ("Hello there", None, "stop", "muse-zen", 100, 20)
 
         monkeypatch.setattr(proxy, "_generate_pool", fake_generate)
         payload = {
@@ -104,11 +110,41 @@ class TestHttpEndpoints:
         assert body["model"] == "muse-zen"
         assert body["usage"]["prompt_tokens"] == 100
 
+    async def test_tool_calling_relayed_end_to_end(
+        self, proxy: OpenAICompatProxy, monkeypatch
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        async def fake_generate(messages, system_instruction, **kwargs):
+            captured["tools"] = kwargs.get("tools")
+            captured["tool_choice"] = kwargs.get("tool_choice")
+            return ("", [{"id": "c1", "type": "function",
+                          "function": {"name": "list_tasks", "arguments": "{}"}}],
+                    "tool_calls", "muse-zen", 40, 9)
+
+        monkeypatch.setattr(proxy, "_generate_pool", fake_generate)
+        payload = {
+            "messages": [{"role": "user", "content": "list tasks"}],
+            "tools": [{"type": "function",
+                       "function": {"name": "list_tasks", "parameters": {}}}],
+            "tool_choice": "auto",
+        }
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(f"{_base_url(proxy)}/v1/chat/completions", json=payload)
+        assert resp.status_code == 200
+        body = resp.json()
+        msg = body["choices"][0]["message"]
+        assert msg["tool_calls"][0]["function"]["name"] == "list_tasks"
+        assert "content" not in msg
+        assert body["choices"][0]["finish_reason"] == "tool_calls"
+        assert captured["tools"] is not None
+        assert captured["tool_choice"] == "auto"
+
     async def test_keep_alive_two_requests(
         self, proxy: OpenAICompatProxy, monkeypatch
     ) -> None:
         async def fake_generate(messages, system_instruction, **kwargs):
-            return ("ok", "muse-zen", 10, 2)
+            return ("ok", None, "stop", "muse-zen", 10, 2)
 
         monkeypatch.setattr(proxy, "_generate_pool", fake_generate)
         payload = {"messages": [{"role": "user", "content": "a"}]}
@@ -164,7 +200,7 @@ class TestPromptCap:
         async def fake_call_model(spec, messages, system_instruction, **kwargs):
             captured["messages"] = messages
             captured["system"] = system_instruction
-            return SimpleNamespace(text="x", usage=None)
+            return SimpleNamespace(text="x", tool_calls=None, finish_reason="stop")
 
         monkeypatch.setattr(
             "gateway.openai_proxy.call_model", fake_call_model
@@ -190,7 +226,7 @@ class TestPromptCap:
             {"role": "user", "content": "c" * 8000},
             {"role": "user", "content": "newest message"},
         ]
-        text, model_id, prompt_bytes, _ = await proxy._generate_pool(
+        text, _tcs, _fr, model_id, prompt_bytes, _ = await proxy._generate_pool(
             history, system_instruction="sys", temperature=0.2
         )
 
@@ -212,5 +248,5 @@ class TestSplitSystemEdge:
                 {"role": "user", "content": None},
             ]
         )
-        assert instruction == "{'text': 'obj'}".strip() or instruction != ""
-        assert chat[0]["content"] == ""
+        assert instruction == "{'text': 'obj'}"
+        assert chat == [{"role": "user"}]

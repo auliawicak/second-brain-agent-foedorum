@@ -35,3 +35,88 @@ async def test_retryable_status_classification() -> None:
     assert ProviderError("x", status=401).retryable is False
     assert ProviderError("x", status=403).retryable is False
     assert ProviderError("x", status=None).retryable is True
+
+
+class FakeResp:
+    def __init__(self, status_code: int, body: dict):
+        self.status_code = status_code
+        self._body = body
+
+    def json(self):
+        return self._body
+
+
+class FakeClient:
+    def __init__(self, body: dict):
+        self.body = body
+        self.sent: dict | None = None
+
+    async def post(self, url, **kwargs):
+        self.sent = {"url": url, **kwargs}
+        return FakeResp(200, self.body)
+
+
+@pytest.mark.asyncio
+async def test_chat_adapter_forwards_tools_and_returns_tool_calls(monkeypatch) -> None:
+    from agent.providers import _call_chat, ProviderResult
+    from agent.registry import ModelSpec
+
+    spec = ModelSpec(
+        id="chat-tools", provider="google", base_url="http://x",
+        api_style="chat_completions", api_key_env="X",
+        tiers=frozenset({"chat"}), priority=0,
+    )
+    fake = FakeClient(
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {"id": "c1", "type": "function",
+                             "function": {"name": "get_weather", "arguments": "{}"}}
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        }
+    )
+    monkeypatch.setattr("agent.providers.shared_client", lambda: fake)
+
+    result: ProviderResult = await _call_chat(
+        spec, [{"role": "user", "content": "weather?"}], "you help",
+        temperature=0.5, max_tokens=100,
+        tools=[{"type": "function", "function": {"name": "get_weather", "parameters": {}}}],
+        tool_choice="auto",
+    )
+    assert fake.sent is not None
+    payload = fake.sent["json"]
+    assert payload["tools"] is not None and payload["tool_choice"] == "auto"
+    assert result.tool_calls == [
+        {"id": "c1", "type": "function", "function": {"name": "get_weather", "arguments": "{}"}}
+    ]
+    assert result.finish_reason == "tool_calls"
+    assert result.text == ""
+
+
+@pytest.mark.asyncio
+async def test_responses_adapter_returns_function_calls(monkeypatch) -> None:
+    from agent.providers import _extract_responses_items
+
+    data = {
+        "output": [
+            {"type": "function_call", "call_id": "fc1", "name": "list_tasks",
+             "arguments": {"status": "pending"}},
+            {"type": "message", "content": [{"type": "output_text", "text": "Checking…"}]},
+        ]
+    }
+    text, calls, fr = _extract_responses_items(data)
+    assert text == "Checking…"
+    assert calls is not None and calls[0]["id"] == "fc1"
+    assert calls[0]["function"] == {
+        "name": "list_tasks", "arguments": '{"status": "pending"}'
+    }
+    assert fr == "tool_calls"

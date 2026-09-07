@@ -9,9 +9,11 @@ process/connection budget.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any
+from uuid import uuid4
 
 import httpx
 
@@ -58,6 +60,8 @@ class ProviderError(Exception):
 class ProviderResult:
     text: str
     usage: dict[str, Any] | None = None
+    tool_calls: list[dict[str, Any]] | None = None
+    finish_reason: str | None = None
 
 
 def _api_key_of(spec: ModelSpec) -> str:
@@ -84,7 +88,9 @@ def _raise_for_response(resp: httpx.Response, spec: ModelSpec) -> None:
 
 
 async def _call_responses(spec: ModelSpec, messages: list[dict], system_instruction: str,
-                          temperature: float, max_tokens: int) -> ProviderResult:
+                          temperature: float, max_tokens: int,
+                          tools: list | None = None,
+                          tool_choice: Any | None = None) -> ProviderResult:
     """OpenAI-compatible `responses` endpoint (zen)."""
     payload: dict[str, Any] = {
         "model": spec.id,
@@ -95,6 +101,10 @@ async def _call_responses(spec: ModelSpec, messages: list[dict], system_instruct
     }
     if not payload.get("instructions"):
         payload.pop("instructions")
+    if tools:
+        payload["tools"] = tools
+    if tool_choice is not None:
+        payload["tool_choice"] = tool_choice
     try:
         resp = await shared_client().post(
             f"{spec.base_url.rstrip('/')}/responses",
@@ -105,27 +115,57 @@ async def _call_responses(spec: ModelSpec, messages: list[dict], system_instruct
         raise ProviderError(f"{spec.provider}/{spec.id} request failed: {e}") from e
     _raise_for_response(resp, spec)
     data = resp.json()
-    text = _extract_responses_text(data)
-    return ProviderResult(text=text, usage=data.get("usage"))
+    text, tool_calls, finish_reason = _extract_responses_items(data)
+    return ProviderResult(
+        text=text, usage=data.get("usage"),
+        tool_calls=tool_calls, finish_reason=finish_reason,
+    )
 
 
 def _extract_responses_text(data: dict) -> str:
+    text, _, _ = _extract_responses_items(data)
+    return text
+
+
+def _extract_responses_items(data: dict) -> tuple[str, list[dict] | None, str | None]:
+    """Pull text + function-call tool_calls out of a Responses-API payload."""
     if not isinstance(data, dict):
-        return ""
+        return "", None, None
+    text = ""
+    tool_calls: list[dict] = []
     for item in data.get("output", []):
-        if isinstance(item, dict) and item.get("type") == "message":
-            content = item.get("content", [])
-            for c in content:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "function_call":
+            args = item.get("arguments")
+            if isinstance(args, dict):
+                args = json.dumps(args)
+            tool_calls.append(
+                {
+                    "id": item.get("call_id") or item.get("id") or f"call_{uuid4().hex[:12]}",
+                    "type": "function",
+                    "function": {
+                        "name": item.get("name", ""),
+                        "arguments": args or "",
+                    },
+                }
+            )
+        if item.get("type") == "message":
+            for c in item.get("content", []):
                 if isinstance(c, dict) and c.get("type") == "output_text":
-                    return c.get("text", "")
-        if isinstance(item, dict) and item.get("type") == "output_text":
-            return item.get("text", "")
-    out = data.get("output_text")
-    return out or ""
+                    text += c.get("text", "")
+        if item.get("type") == "output_text":
+            text += item.get("text", "")
+    if not tool_calls and not text:
+        text = data.get("output_text") or ""
+    finish_reason = "tool_calls" if tool_calls else ("stop" if text else None)
+    return text, (tool_calls or None), finish_reason
 
 
 async def _call_chat(spec: ModelSpec, messages: list[dict], system_instruction: str,
-                     temperature: float, max_tokens: int) -> ProviderResult:
+                     temperature: float, max_tokens: int,
+                     tools: list | None = None,
+                     tool_choice: Any | None = None) -> ProviderResult:
     """OpenAI-compatible `chat/completions` endpoint (everything else)."""
     chat_messages: list[dict] = []
     if system_instruction:
@@ -139,6 +179,10 @@ async def _call_chat(spec: ModelSpec, messages: list[dict], system_instruction: 
         "max_tokens": max_tokens,
         "stream": False,
     }
+    if tools:
+        payload["tools"] = tools
+    if tool_choice is not None:
+        payload["tool_choice"] = tool_choice
     try:
         resp = await shared_client().post(
             f"{spec.base_url.rstrip('/')}/chat/completions",
@@ -153,12 +197,21 @@ async def _call_chat(spec: ModelSpec, messages: list[dict], system_instruction: 
     _raise_for_response(resp, spec)
     data = resp.json()
     text = ""
+    tool_calls = None
+    finish_reason = None
     if isinstance(data, dict):
         choices = data.get("choices") or []
         if choices:
-            msg = choices[0].get("message") or {}
+            first = choices[0]
+            msg = first.get("message") or {}
             text = msg.get("content") or ""
-    return ProviderResult(text=text, usage=data.get("usage") if isinstance(data, dict) else None)
+            if msg.get("tool_calls"):
+                tool_calls = msg["tool_calls"]
+            finish_reason = first.get("finish_reason")
+    return ProviderResult(
+        text=text, usage=data.get("usage") if isinstance(data, dict) else None,
+        tool_calls=tool_calls, finish_reason=finish_reason,
+    )
 
 
 def _estimate_prompt_bytes(messages: list[dict], system_instruction: str | None) -> int:
@@ -175,17 +228,21 @@ async def call_model(
     *,
     temperature: float = 0.7,
     max_tokens: int | None = None,
+    tools: list | None = None,
+    tool_choice: Any | None = None,
 ) -> ProviderResult:
     """Dispatch one call to a model through the right provider adapter."""
     if max_tokens is None:
         max_tokens = spec.max_output_tokens
     if spec.api_style == "responses":
         result = await _call_responses(
-            spec, messages, system_instruction, temperature, max_tokens
+            spec, messages, system_instruction, temperature, max_tokens,
+            tools=tools, tool_choice=tool_choice,
         )
     else:
         result = await _call_chat(
-            spec, messages, system_instruction, temperature, max_tokens
+            spec, messages, system_instruction, temperature, max_tokens,
+            tools=tools, tool_choice=tool_choice,
         )
     return result
 
