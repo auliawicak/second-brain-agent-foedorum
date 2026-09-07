@@ -101,6 +101,37 @@ async def complete_task(task_id: int) -> str:
     return f"❌ Task #{task_id} not found."
 
 
+async def complete_tasks(task_ids: list) -> str:
+    """Mark several tasks as completed in a single action.
+
+    Prefer this over complete_task when the user asks to finish multiple tasks
+    at once — the user only confirms one batched action.
+
+    Args:
+        task_ids: The IDs of the tasks to complete. Accepts ints or '#id'/'id' strings.
+    """
+    db = _get_db()
+    seen: list[int] = []
+    for value in task_ids or []:
+        try:
+            n = int(str(value).strip().lstrip("#"))
+        except (TypeError, ValueError):
+            continue
+        if n > 0 and n not in seen:
+            seen.append(n)
+    if not seen:
+        return "❌ No valid task IDs given."
+
+    lines = []
+    for n in seen:
+        task = await db.complete_task(n)
+        if task:
+            lines.append(f"✅ Task #{task.id} completed: {task.description}")
+    if not lines:
+        return "❌ None of those tasks were found."
+    return "\n".join(lines)
+
+
 async def get_today_agenda() -> str:
     """Get today's agenda: pending tasks, due items, and active reminders."""
     db = _get_db()
@@ -367,6 +398,7 @@ ALL_TOOLS = [
     add_task,
     list_tasks,
     complete_task,
+    complete_tasks,
     get_today_agenda,
     save_note,
     search_notes,

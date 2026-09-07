@@ -36,6 +36,8 @@ from agent.confirmation import (
     CONFIRMING_TOOLS,
     confirmation_question,
     is_confirmation,
+    is_rejection,
+    summarize_action,
 )
 from agent.prompts import MAIN_PERSONA, DEEP_THINKING_PROMPT, NEWS_CURATOR_PROMPT
 from agent.router import TIER_MAP, route
@@ -82,7 +84,8 @@ TOOL_POLICY = """
 ```
 - Do not describe or acknowledge in prose first — just the JSON block.
 - For pure questions that need no action, answer normally in prose.
-- Mutating tools (add_task, complete_task, save_note, set_reminder, save_preference) are confirmed with the user by the system before execution — you do NOT need to ask permission yourself, and you must NOT claim you performed an action until you receive a "Tool result:" message.
+- Mutating tools (add_task, complete_task, complete_tasks, save_note, set_reminder, save_preference) are confirmed with the user by the system before execution — you do NOT need to ask permission yourself, and you must NOT claim you performed an action until you receive a "Tool result:" message.
+- To complete multiple tasks at once, call `complete_tasks` with every task ID in a single call.
 - After you receive a "Tool result:" message, reply to the user in short prose summarizing the outcome.
 """
 
@@ -276,16 +279,74 @@ class SecondBrain:
             self._chat_history = self._chat_history[-40:]
 
         # ── Confirmation gate ─────────────────────────────────────────────
+        # The pending action survives across unrelated user messages — it is
+        # only consumed by an explicit yes (confirmed below), an explicit no,
+        # or a fresh model proposal that replaces it. A stale yes is re-asked,
+        # never silently swallowed.
         self._turn_confirmed = confirmed
         resume: tuple[str, dict] | None = None
         pending = self._pending_confirmation
-        self._pending_confirmation = None
-        if pending and not confirmed and is_confirmation(message):
+        pending_hint = ""
+
+        if confirmed:
+            # Slash command = explicit intent; any stray pending is dropped.
+            self._pending_confirmation = None
+
+        elif pending and is_confirmation(message):
             age = time.time() - pending.get("ts", 0)
             if age <= CONFIRMATION_TTL_SECONDS:
                 resume = (pending["tool"], pending["args"])
                 self._turn_confirmed = True
-        # Any other (or expired) pending is dropped here.
+                self._pending_confirmation = None
+            else:
+                # Expired: don't run stale args and don't pretend we did.
+                # Re-ask explicitly and keep the action fresh for the next yes.
+                self._pending_confirmation = {
+                    **pending,
+                    "ts": time.time(),
+                }
+                summary = summarize_action(pending["tool"], pending["args"])
+                response_text = (
+                    f"That request expired while we waited. Shall I still "
+                    f"go ahead — {summary}? (reply yes to confirm)"
+                )
+                logger.info(
+                    "Expired confirmation re-asked for %s", pending["tool"]
+                )
+                self._chat_history.append(
+                    {"role": "assistant", "content": response_text}
+                )
+                await self.db.log_conversation("assistant", response_text)
+                _, model_tier = self._last_model
+                self.last_chat = ChatResult(
+                    text=response_text,
+                    model_id=None,
+                    tier=model_tier or "chat",
+                )
+                return self.last_chat
+
+        elif pending and is_rejection(message):
+            # User said no / cancel: drop it and let the model acknowledge.
+            self._pending_confirmation = None
+            pending_hint = (
+                "\nThe user declined the previously pending action. "
+                "Do not perform it — just acknowledge briefly."
+            )
+
+        elif pending:
+            # Refining reply (e.g. '1 2 and 3'): KEEP the pending across turns
+            # instead of silently dropping it, and steer the model to adjust
+            # the action rather than re-asking the same question.
+            pending_hint = (
+                "\nA previous action is awaiting the user's confirmation: "
+                f"{summarize_action(pending['tool'], pending['args'])}. "
+                "Do NOT ask about it again. Wait for the user to confirm, "
+                "decline, or adjust it; if they adjust the details, call the "
+                "tool again with the updated arguments."
+            )
+
+        if pending_hint:
+            system_prompt = system_prompt + pending_hint
 
         tool_result: str | None = None
         last_tool: str | None = None

@@ -13,6 +13,7 @@ import re
 CONFIRMING_TOOLS = {
     "add_task",
     "complete_task",
+    "complete_tasks",
     "save_note",
     "set_reminder",
     "save_preference",
@@ -21,7 +22,10 @@ CONFIRMING_TOOLS = {
 }
 
 # How long a pending confirmation stays valid before it must be re-requested.
-CONFIRMATION_TTL_SECONDS = 600
+# Deliberately generous: the user often replies much later than the last model
+# question. An expired confirmation is never silently swallowed — it is
+# re-asked explicitly so the user's "yes" always lands on a live action.
+CONFIRMATION_TTL_SECONDS = 3600
 
 # A user reply beginning with any of these counts as confirmation.
 _AFFIRMATIONS = (
@@ -40,9 +44,44 @@ def is_confirmation(text: str) -> bool:
     return bool(_AFFIRMATION_RE.match(text or ""))
 
 
+# A user reply beginning with any of these declines a pending action.
+_REJECTIONS = (
+    r"(?:no\b|nope\b|nah\b|cancel\b|never ?mind\b|forget it\b|skip\b|"
+    r"decline\b|dont\b|stop\b|drop it\b|leave it\b|not now\b)"
+)
+_REJECTION_RE = re.compile(rf"^\s*{_REJECTIONS}", re.IGNORECASE)
+
+
+def is_rejection(text: str) -> bool:
+    """True if the message declines a pending action (e.g. 'no', 'cancel')."""
+    t = (text or "").strip().lower().replace("'", "").replace("`", "")
+    return bool(_REJECTION_RE.match(t))
+
+
 def _clip(value: object, limit: int = 90) -> str:
     s = str(value or "").strip()
     return s if len(s) <= limit else s[: limit - 1] + "…"
+
+
+def _pretty_ids(values: object) -> str:
+    """Coerce a mixed list of ids (ints or '3'/'#3' strings) into '1, 2, and 7'.
+
+    Invalid entries are ignored; duplicates collapsed in first-seen order.
+    """
+    seen: list[int] = []
+    for value in values or []:
+        try:
+            n = int(str(value).strip().lstrip("#"))
+        except (TypeError, ValueError):
+            continue
+        if n > 0 and n not in seen:
+            seen.append(n)
+    if not seen:
+        return ""
+    if len(seen) == 1:
+        return str(seen[0])
+    head = ", ".join(str(n) for n in seen[:-1])
+    return f"{head}, and {seen[-1]}"
 
 
 def confirmation_question(tool_name: str, args: dict | None) -> str | None:
@@ -71,6 +110,14 @@ def confirmation_question(tool_name: str, args: dict | None) -> str | None:
         if task_id is None:
             return None
         return f"Do you want me to mark task **#{task_id}** as completed?"
+
+    if tool_name == "complete_tasks":
+        pretty = _pretty_ids(args.get("task_ids") or [])
+        if not pretty:
+            return None
+        if "," in pretty:
+            return f"Do you want me to mark tasks **#{pretty}** as completed?"
+        return f"Do you want me to mark task **#{pretty}** as completed?"
 
     if tool_name == "save_note":
         content = _clip(args.get("content", ""))
@@ -111,3 +158,8 @@ def confirmation_question(tool_name: str, args: dict | None) -> str | None:
         )
 
     return None
+
+
+def summarize_action(tool_name: str, args: dict | None) -> str:
+    """Human-readable summary of a pending action (for expiry/pending hints)."""
+    return confirmation_question(tool_name, args) or f"run `{tool_name}`"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from agent.confirmation import (
     CONFIRMING_TOOLS,
     confirmation_question,
     is_confirmation,
+    is_rejection,
 )
 from agent.brain import ChatResult, SecondBrain
 from storage.database import Database
@@ -46,6 +48,11 @@ def test_confirmation_questions() -> None:
     assert q == "Do you want me to add the task **buy milk** (due 2026-09-07)?"
     q = confirmation_question("complete_task", {"task_id": 3})
     assert "#3" in q
+    q = confirmation_question(
+        "complete_tasks", {"task_ids": ["#1", 2, "3", "#1"]}
+    )
+    assert q == "Do you want me to mark tasks **#1, 2, and 3** as completed?"
+    assert confirmation_question("complete_tasks", {"task_ids": []}) is None
     q = confirmation_question("save_note", {"content": "idea: garden"})
     assert "garden" in q
     q = confirmation_question("set_reminder", {"message": "call mom", "trigger_time": "2026-09-07T10:00:00"})
@@ -60,12 +67,42 @@ def test_confirming_tools_are_the_mutators() -> None:
     assert CONFIRMING_TOOLS == {
         "add_task",
         "complete_task",
+        "complete_tasks",
         "save_note",
         "set_reminder",
         "save_preference",
         "remember_fact",
         "record_correction",
     }
+
+
+def test_is_rejection() -> None:
+    for no in (
+        "no",
+        "nope",
+        "no thanks",
+        "nah",
+        "cancel",
+        "cancel that",
+        "never mind",
+        "forget it",
+        "skip it",
+        "don't",
+        "drop it",
+        "not now",
+    ):
+        assert is_rejection(no), no
+    for keep in (
+        "yes",
+        "sure go ahead",
+        "y",
+        "1 2 and 3",
+        "please complete them",
+        "task no 5 is wrong",
+        "maybe",
+        "why did that fail",
+    ):
+        assert not is_rejection(keep), keep
 
 
 # ─── gate behaviour in chat() ───────────────────────────────────────────────
@@ -145,3 +182,73 @@ async def test_read_tools_run_without_confirmation(db: Database, monkeypatch) ->
     assert "existing one" in (result.tool_result or "")
     assert b._pending_confirmation is None
     await b.stop()
+
+
+async def test_non_confirmation_keeps_pending_across_turns(
+    brain: SecondBrain, db: Database
+) -> None:
+    r = await brain.chat("add buy milk to my tasks")
+    assert r.executed_tool is False
+    assert brain._pending_confirmation is not None
+
+    # A refining reply ("1 2 and 3") is neither yes nor no: the pending
+    # action must SURVIVE the turn so the user's eventual yes still lands.
+    r2 = await brain.chat("1 2 and 3")
+    assert r2.executed_tool is False
+    assert brain._pending_confirmation is not None
+    assert await db.get_tasks() == []
+
+    r3 = await brain.chat("yes")
+    assert r3.executed_tool is True
+    assert len(await db.get_tasks()) == 1
+    assert brain._pending_confirmation is None
+
+
+async def test_expired_confirmation_is_reasked_not_executed(
+    brain: SecondBrain, db: Database
+) -> None:
+    await brain.chat("add buy milk to my tasks")
+    assert brain._pending_confirmation is not None
+    brain._pending_confirmation["ts"] = time.time() - 99999
+
+    r = await brain.chat("yes")
+    assert r.executed_tool is False
+    assert "expired" in r.text.lower()
+    assert await db.get_tasks() == []                       # nothing ran
+    assert brain._pending_confirmation is not None          # kept fresh
+
+    r2 = await brain.chat("yes")                            # now within TTL
+    assert r2.executed_tool is True
+    assert len(await db.get_tasks()) == 1
+    assert brain._pending_confirmation is None
+
+
+async def test_rejection_drops_pending_without_executing(
+    brain: SecondBrain, db: Database
+) -> None:
+    await brain.chat("add buy milk to my tasks")
+    assert brain._pending_confirmation is not None
+
+    r = await brain.chat("no thanks")
+    assert brain._pending_confirmation is None
+    assert r.executed_tool is False
+    assert await db.get_tasks() == []
+
+
+async def test_complete_tasks_batch_coerces_ids(
+    db: Database, monkeypatch
+) -> None:
+    from agent.tools import complete_tasks, set_database
+    from storage.models import TaskCreate
+
+    set_database(db)
+    for name in ("buy milk", "wash car", "walk dog"):
+        await db.add_task(TaskCreate(description=name))
+
+    result = await complete_tasks(["#1", "2", "3", "2", "oops"])
+    assert "buy milk" in result and "wash car" in result and "walk dog" in result
+    assert all(t.status == "done" for t in await db.get_tasks())
+
+    assert "None of those tasks were found" in await complete_tasks(["#999"])
+    assert "No valid" in await complete_tasks([])
+    assert "No valid" in await complete_tasks(["abc"])
