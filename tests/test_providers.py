@@ -130,6 +130,41 @@ async def test_zen_calls_carry_x_opencode_session(monkeypatch) -> None:
     assert fake2.sent["headers"]["x-opencode-session"] == "secondbrain-proxy"
 
 
+def test_responses_tool_conversion() -> None:
+    from agent.providers import _to_responses_messages, _to_responses_tool_choice, _to_responses_tools
+
+    tools = [
+        {"type": "function", "function": {
+            "name": "math_add", "description": "Add", "parameters": {"type": "object"},
+        }}
+    ]
+    assert _to_responses_tools(tools) == [
+        {"type": "function", "name": "math_add",
+         "description": "Add", "parameters": {"type": "object"}}
+    ]
+    assert _to_responses_tools(None) is None
+    assert _to_responses_tool_choice("auto") == "auto"
+    assert _to_responses_tool_choice(
+        {"type": "function", "function": {"name": "math_add"}}
+    ) == {"type": "function", "name": "math_add"}
+
+    converted = _to_responses_messages(
+        [
+            {"role": "user", "content": "compute"},
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "call_1", "type": "function",
+                             "function": {"name": "math_add", "arguments": '{"a":2,"b":2}'}}]},
+            {"role": "tool", "content": "4", "tool_call_id": "call_1"},
+        ]
+    )
+    assert converted[0] == {"role": "user", "content": [{"type": "input_text", "text": "compute"}]}
+    assert converted[1]["output"][0]["type"] == "function_call"
+    assert converted[1]["output"][0]["call_id"] == "call_1"
+    assert converted[1]["output"][0]["arguments"] == '{"a":2,"b":2}'
+    assert converted[2] == {"role": "tool", "call_id": "call_1",
+                            "content": [{"type": "input_text", "text": "4"}]}
+
+
 @pytest.mark.asyncio
 async def test_responses_adapter_returns_function_calls(monkeypatch) -> None:
     from agent.providers import _extract_responses_items

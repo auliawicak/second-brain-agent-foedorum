@@ -115,17 +115,17 @@ async def _call_responses(spec: ModelSpec, messages: list[dict], system_instruct
     """OpenAI-compatible `responses` endpoint (zen)."""
     payload: dict[str, Any] = {
         "model": spec.id,
-        "input": messages,
+        "input": _to_responses_messages(messages),
         "instructions": system_instruction or None,
         "temperature": temperature,
         "max_output_tokens": max_tokens,
     }
     if not payload.get("instructions"):
         payload.pop("instructions")
-    if tools:
-        payload["tools"] = tools
-    if tool_choice is not None:
-        payload["tool_choice"] = tool_choice
+    converted_tools = _to_responses_tools(tools)
+    if converted_tools:
+        payload["tools"] = converted_tools
+    payload["tool_choice"] = _to_responses_tool_choice(tool_choice)
     try:
         resp = await shared_client().post(
             f"{spec.base_url.rstrip('/')}/responses",
@@ -181,6 +181,80 @@ def _extract_responses_items(data: dict) -> tuple[str, list[dict] | None, str | 
         text = data.get("output_text") or ""
     finish_reason = "tool_calls" if tool_calls else ("stop" if text else None)
     return text, (tool_calls or None), finish_reason
+
+
+def _to_responses_tools(tools: list | None) -> list | None:
+    """Chat-completions tool shape → Responses-API tool shape.
+
+    Hermes sends ``[{"type":"function","function":{name,description,parameters}}]``
+    but OpenCode Zen's `/responses` schema wants the fields flattened on the
+    tool object itself. Anything already Responses-shaped passes through.
+    """
+    if not tools:
+        return None
+    out: list[dict] = []
+    for t in tools:
+        if not isinstance(t, dict):
+            continue
+        if t.get("type") == "function" and "function" in t:
+            fn = t.get("function") or {}
+            item: dict[str, Any] = {"type": "function", "name": fn.get("name", "")}
+            for key in ("description", "parameters", "strict"):
+                if fn.get(key) is not None:
+                    item[key] = fn[key]
+            out.append(item)
+        else:
+            out.append(t)
+    return out or None
+
+
+def _to_responses_tool_choice(choice: Any) -> Any:
+    if choice in ("auto", "none", "required") or choice is None:
+        return choice
+    if isinstance(choice, dict) and choice.get("type") == "function":
+        fn = choice.get("function") or {}
+        return {"type": "function", "name": fn.get("name", "")}
+    return choice
+
+
+def _to_responses_messages(messages: list[dict]) -> list[dict]:
+    """Chat-completions message history → Responses-API input.
+
+    Converts assistant `tool_calls` into the Responses `output` function_call
+    items and tool results into `role: tool` messages with a `call_id`, so
+    multi-turn tool loops survive the relay.
+    """
+    out: list[dict] = []
+    for m in messages:
+        role = m.get("role", "user")
+        content = m.get("content")
+        item: dict[str, Any] = {"role": role}
+        if isinstance(content, str) and content:
+            item["content"] = [{"type": "input_text", "text": content}]
+        elif content is not None:
+            item["content"] = content
+        if role == "assistant" and m.get("tool_calls"):
+            output = []
+            for tc in m["tool_calls"]:
+                if not isinstance(tc, dict) or tc.get("type") != "function":
+                    continue
+                fn = tc.get("function") or {}
+                call_id = tc.get("id") or f"call_{uuid4().hex[:12]}"
+                output.append(
+                    {
+                        "type": "function_call",
+                        "id": call_id,
+                        "call_id": call_id,
+                        "name": fn.get("name", ""),
+                        "arguments": fn.get("arguments", ""),
+                    }
+                )
+            if output:
+                item["output"] = output
+        if role == "tool":
+            item["call_id"] = m.get("tool_call_id") or f"call_{uuid4().hex[:12]}"
+        out.append(item)
+    return out
 
 
 async def _call_chat(spec: ModelSpec, messages: list[dict], system_instruction: str,
