@@ -1,5 +1,5 @@
-"""Standalone access to the Second Brain (Hermes-facing)."""
+"""Standalone access to the Second Brain (Hermes-facing).
 
-from secondbrain.cli import main
-
-__all__ = ["main"]
+Entry point is `python -m secondbrain.cli`. Nothing is imported eagerly here
+so running the module never triggers a double-import `RuntimeWarning`.
+"""
