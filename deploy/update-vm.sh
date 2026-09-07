@@ -38,6 +38,9 @@ gcloud compute scp "${TARBALL}" "${INSTANCE_NAME}:/tmp/" \
 gcloud compute ssh "${INSTANCE_NAME}" --project="${PROJECT_ID}" --zone="${ZONE}" --quiet -- \
     "sudo tar -xzf /tmp/secondbrain-deploy.tar.gz -C /opt/second-brain &&
      sudo chown -R root:root /opt/second-brain &&
+     # Hermes Agent (second brain's future front-end) runs as this unprivileged
+     # user; give it write access to the SQLite data so its CLI can mutate.
+     sudo chown -R auliawicaksono:root /opt/second-brain/data &&
      sudo /opt/second-brain/.venv/bin/pip install -r /opt/second-brain/requirements.txt -q &&
      sudo systemctl restart second-brain &&
      rm -f /tmp/secondbrain-deploy.tar.gz"
