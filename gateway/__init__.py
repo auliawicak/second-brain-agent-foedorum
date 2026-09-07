@@ -1,0 +1,1 @@
+"""Gateway layer: OpenAI-compatible bridge between external agents and the model pool."""
