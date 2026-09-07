@@ -127,3 +127,53 @@ class TestErrorPaths:
         db = tmp_path / "brain.db"
         result = await _run("tasks", ns("tasks", db, action="complete", ids=[]))
         assert "No valid task IDs given." in result
+
+
+class TestScheduledJobs:
+    async def test_day_stats(self, tmp_path: Path) -> None:
+        db = tmp_path / "brain.db"
+        await _run("tasks", ns("tasks", db, action="add", description="a"))
+        result = await _run("tasks", ns("tasks", db, action="day-stats"))
+        assert "Created today: 1" in result
+
+    async def test_corrections_list_today(self, tmp_path: Path) -> None:
+        db = tmp_path / "brain.db"
+        await _run("corrections", ns("corrections", db, action="add",
+                                     correction="Schedule workouts in the morning",
+                                     scope="tasks"))
+        result = await _run("corrections", ns("corrections", db,
+                                              action="list-today"))
+        assert "Schedule workouts in the morning" in result
+
+    async def test_conditions_quiet(self, tmp_path: Path) -> None:
+        db = tmp_path / "brain.db"
+        result = await _run("conditions", ns("conditions", db, action="check"))
+        assert result == ""
+
+    async def test_fire_due_advances_recurring_and_deactivates(self, tmp_path: Path) -> None:
+        db = tmp_path / "brain.db"
+        await _run("reminders", ns("reminders", db, action="set",
+                                   message="one-shot past", trigger_time="2020-01-01T00:00:00",
+                                   recurring=False, cron_expression=None))
+        await _run("reminders", ns("reminders", db, action="set",
+                                   message="recurring past", trigger_time="2020-01-01T00:00:00",
+                                   recurring=True, cron_expression="0 5 * * *"))
+        fired = await _run("reminders", ns("reminders", db, action="fire-due"))
+        assert "one-shot past" in fired
+        assert "recurring past" in fired
+
+        listing_all = await _run("reminders", ns("reminders", db, action="list",
+                                                 all=True, query=""))
+        assert "one-shot past" in listing_all and "[inactive]" in listing_all
+        from datetime import datetime as dt, timedelta
+
+        from config import Config
+
+        tomorrow = (dt.now(Config.TIMEZONE) + timedelta(days=1)).strftime("%Y-%m-%d")
+        assert f"recurring past — {tomorrow}T05:00:00" in listing_all
+
+    async def test_maintenance_run(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.delenv("BACKUP_BUCKET", raising=False)
+        db = tmp_path / "brain.db"
+        result = await _run("maintenance", ns("maintenance", db, action="run"))
+        assert "Nightly maintenance completed" in result

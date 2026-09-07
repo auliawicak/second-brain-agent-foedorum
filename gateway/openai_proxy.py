@@ -324,3 +324,28 @@ class OpenAICompatProxy:
             "You are a smoke test.",
         )
         return f"{model_id}: {text}"
+
+
+async def _serve_forever(proxy: OpenAICompatProxy) -> None:
+    await proxy.start()
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await proxy.stop()
+
+
+def main() -> None:
+    """Standalone entrypoint for the systemd service."""
+    logging.basicConfig(
+        level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
+        format="%(asctime)s | %(levelname)-8s | %(name)-25s | %(message)s",
+    )
+    proxy = OpenAICompatProxy()
+    try:
+        asyncio.run(_serve_forever(proxy))
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()

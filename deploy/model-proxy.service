@@ -1,0 +1,14 @@
+[Unit]
+Description=Second Brain model-pool OpenAI-compatible proxy (Hermes bridge)
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/second-brain
+Environment=PYTHONPATH=/opt/second-brain
+EnvironmentFile=/opt/second-brain/.env
+ExecStart=/opt/second-brain/.venv/bin/python -m gateway.openai_proxy
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

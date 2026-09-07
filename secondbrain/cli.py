@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from datetime import timedelta
 
 from agent import tools
 from config import Config
@@ -46,6 +47,7 @@ def _build_parser() -> argparse.ArgumentParser:
     lst.add_argument("--date", default=None)
     comp = tasks_sub.add_parser("complete", help="Complete one or more tasks")
     comp.add_argument("ids", nargs="+")
+    tasks_sub.add_parser("day-stats", help="Created vs completed today")
 
     notes = sub.add_parser("notes", help="Note operations")
     notes_sub = notes.add_subparsers(dest="action", required=True)
@@ -68,6 +70,7 @@ def _build_parser() -> argparse.ArgumentParser:
     rm_list = reminders_sub.add_parser("list", help="List reminders")
     rm_list.add_argument("--all", action="store_true", help="Include inactive")
     rm_list.add_argument("--query", default="")
+    reminders_sub.add_parser("fire-due", help="Print + advance due reminders")
 
     prefs = sub.add_parser("prefs", help="Preferences")
     prefs_sub = prefs.add_subparsers(dest="action", required=True)
@@ -87,6 +90,15 @@ def _build_parser() -> argparse.ArgumentParser:
     corr_add = corr_sub.add_parser("add", help="Record a correction")
     corr_add.add_argument("correction")
     corr_add.add_argument("--scope", default="general")
+    corr_sub.add_parser("list-today", help="Corrections recorded today")
+
+    conditions = sub.add_parser("conditions", help="Condition checks (15-min pass)")
+    conditions_sub = conditions.add_subparsers(dest="action", required=True)
+    conditions_sub.add_parser("check", help="Evaluate and print condition nudges")
+
+    maintenance = sub.add_parser("maintenance", help="Nightly DB maintenance")
+    maintenance_sub = maintenance.add_subparsers(dest="action", required=True)
+    maintenance_sub.add_parser("run", help="Retention + markdown export + backup")
 
     sub.add_parser("news", help="Fetch raw news for curation")
     sub.add_parser("agenda", help="Today's agenda")
@@ -111,7 +123,7 @@ async def _run(command: str, args: argparse.Namespace) -> str:
     tools.set_database(db)
     try:
         if command == "tasks":
-            return await _tasks(args)
+            return await _tasks(args, db)
         if command == "notes":
             return await _notes(args)
         if command == "reminders":
@@ -123,9 +135,11 @@ async def _run(command: str, args: argparse.Namespace) -> str:
                 args.fact, category=args.category, keywords=args.keywords
             )
         if command == "corrections":
-            return await tools.record_correction(
-                args.correction, scope=args.scope
-            )
+            return await _corrections(args, db)
+        if command == "conditions":
+            return await _conditions(args, db)
+        if command == "maintenance":
+            return await _maintenance(args, db)
         if command == "news":
             return await tools.get_news()
         if command == "agenda":
@@ -137,7 +151,7 @@ async def _run(command: str, args: argparse.Namespace) -> str:
         await db.close()
 
 
-async def _tasks(args: argparse.Namespace) -> str:
+async def _tasks(args: argparse.Namespace, db: Database) -> str:
     action = getattr(args, "action", "")
     if action == "add":
         return await tools.add_task(
@@ -156,6 +170,16 @@ async def _tasks(args: argparse.Namespace) -> str:
         )
     if action == "complete":
         return await tools.complete_tasks(getattr(args, "ids", []))
+    if action == "day-stats":
+        from datetime import datetime as dt
+
+        now = dt.now(Config.TIMEZONE)
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = day_start + timedelta(days=1)
+        created, completed = await db.get_day_task_stats(
+            day_start.isoformat(), day_end.isoformat()
+        )
+        return f"Created today: {created} | Completed today: {completed}"
     return "Unknown tasks action"
 
 
@@ -190,7 +214,94 @@ async def _reminders(args: argparse.Namespace) -> str:
             active_only=not getattr(args, "all", False),
             query=getattr(args, "query", ""),
         )
+    if action == "fire-due":
+        return await _fire_due_reminders(_get_db())
     return "Unknown reminders action"
+
+
+async def _fire_due_reminders(db: Database) -> str:
+    """Replicates the old scheduler's reminder_check: fires due reminders and
+    advances recurring ones (non-recurring are deactivated). Prints exactly the
+    messages so a `--no-agent` Hermes cron job can deliver them verbatim.
+    """
+    from datetime import datetime as dt
+
+    from services.scheduler import _next_cron_occurrence
+
+    now_naive = dt.now(Config.TIMEZONE).isoformat()
+    due = await db.get_due_reminders(now_naive)
+    lines: list[str] = []
+    for reminder in due:
+        lines.append(f"⏰ **Reminder:** {reminder.message}")
+        if not reminder.is_recurring:
+            await db.deactivate_reminder(reminder.id)
+            continue
+        next_time = _next_cron_occurrence(reminder.cron_expression) if reminder.cron_expression else None
+        if next_time:
+            await db.update_reminder_time(reminder.id, next_time)
+        else:
+            await db.deactivate_reminder(reminder.id)
+    try:
+        await db.update_heartbeat()
+    except Exception:
+        pass
+    return "\n".join(lines)
+
+
+async def _corrections(args: argparse.Namespace, db: Database) -> str:
+    action = getattr(args, "action", "")
+    if action == "add":
+        return await tools.record_correction(
+            args.correction, scope=getattr(args, "scope", "general")
+        )
+    if action == "list-today":
+        from datetime import datetime as dt
+
+        now = dt.now(Config.TIMEZONE).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        rows = await db.get_corrections_since(now.isoformat())
+        if not rows:
+            return "No corrections recorded today."
+        lines = ["🛠️ **Corrections today:**"]
+        for row in rows:
+            text = (row.get("correction") or "")[:200]
+            created = (row.get("created_at") or "")[:16]
+            lines.append(f"- {created}: {text}")
+        return "\n".join(lines)
+    return "Unknown corrections action"
+
+
+async def _conditions(args: argparse.Namespace, db: Database) -> str:
+    from services.triggers import run_condition_checks
+
+    lines = await run_condition_checks(db)
+    if not lines:
+        return ""
+    body = "\n\n".join(lines)
+    if len(lines) > 1:
+        body = "🧠 **A few things need your attention:**\n\n" + body
+    return body
+
+
+async def _maintenance(args: argparse.Namespace, db: Database) -> str:
+    from services.export import run_backup, run_markdown_export, run_retention
+
+    await run_retention(db)
+    await run_markdown_export(db)
+    result = await run_backup(db)
+    out = "🧹 Nightly maintenance completed (retention + export)."
+    if result.get("skipped"):
+        out += " Backup skipped (BACKUP_BUCKET unset)."
+    elif result.get("uploaded"):
+        out += f" Backup uploaded ({result.get('blob_name', '')})."
+    return out
+
+
+def _get_db() -> Database:
+    from agent.tools import _get_db as undr
+
+    return undr()
 
 
 async def _persona(args: argparse.Namespace, db: Database) -> str:
