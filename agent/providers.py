@@ -70,6 +70,26 @@ def _api_key_of(spec: ModelSpec) -> str:
     return os.environ.get(spec.api_key_env, "")
 
 
+def _openai_headers(
+    spec: ModelSpec, *, session_id: str | None = None, content_type: bool = False
+) -> dict[str, str]:
+    """Headers for an OpenAI-compatible provider call.
+
+    OpenCode Zen/Go reject requests that omit `x-opencode-session`; the value
+    just needs to be a stable per-conversation id (many proxies collapse the
+    session for routing and prompt caching).
+    """
+    headers = {"Authorization": f"Bearer {_api_key_of(spec)}"}
+    if content_type:
+        headers["Content-Type"] = "application/json"
+    session = session_id
+    if not session and spec.provider == "zen":
+        session = "secondbrain-proxy"
+    if session:
+        headers["x-opencode-session"] = session
+    return headers
+
+
 def _raise_for_response(resp: httpx.Response, spec: ModelSpec) -> None:
     if resp.status_code < 400:
         return
@@ -90,7 +110,8 @@ def _raise_for_response(resp: httpx.Response, spec: ModelSpec) -> None:
 async def _call_responses(spec: ModelSpec, messages: list[dict], system_instruction: str,
                           temperature: float, max_tokens: int,
                           tools: list | None = None,
-                          tool_choice: Any | None = None) -> ProviderResult:
+                          tool_choice: Any | None = None,
+                          session_id: str | None = None) -> ProviderResult:
     """OpenAI-compatible `responses` endpoint (zen)."""
     payload: dict[str, Any] = {
         "model": spec.id,
@@ -108,7 +129,7 @@ async def _call_responses(spec: ModelSpec, messages: list[dict], system_instruct
     try:
         resp = await shared_client().post(
             f"{spec.base_url.rstrip('/')}/responses",
-            headers={"Authorization": f"Bearer {_api_key_of(spec)}"},
+            headers=_openai_headers(spec, session_id=session_id),
             json=payload,
         )
     except httpx.HTTPError as e:
@@ -165,7 +186,8 @@ def _extract_responses_items(data: dict) -> tuple[str, list[dict] | None, str | 
 async def _call_chat(spec: ModelSpec, messages: list[dict], system_instruction: str,
                      temperature: float, max_tokens: int,
                      tools: list | None = None,
-                     tool_choice: Any | None = None) -> ProviderResult:
+                     tool_choice: Any | None = None,
+                     session_id: str | None = None) -> ProviderResult:
     """OpenAI-compatible `chat/completions` endpoint (everything else)."""
     chat_messages: list[dict] = []
     if system_instruction:
@@ -186,10 +208,7 @@ async def _call_chat(spec: ModelSpec, messages: list[dict], system_instruction: 
     try:
         resp = await shared_client().post(
             f"{spec.base_url.rstrip('/')}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {_api_key_of(spec)}",
-                "Content-Type": "application/json",
-            },
+            headers=_openai_headers(spec, session_id=session_id, content_type=True),
             json=payload,
         )
     except httpx.HTTPError as e:
@@ -230,6 +249,7 @@ async def call_model(
     max_tokens: int | None = None,
     tools: list | None = None,
     tool_choice: Any | None = None,
+    session_id: str | None = None,
 ) -> ProviderResult:
     """Dispatch one call to a model through the right provider adapter."""
     if max_tokens is None:
@@ -237,12 +257,12 @@ async def call_model(
     if spec.api_style == "responses":
         result = await _call_responses(
             spec, messages, system_instruction, temperature, max_tokens,
-            tools=tools, tool_choice=tool_choice,
+            tools=tools, tool_choice=tool_choice, session_id=session_id,
         )
     else:
         result = await _call_chat(
             spec, messages, system_instruction, temperature, max_tokens,
-            tools=tools, tool_choice=tool_choice,
+            tools=tools, tool_choice=tool_choice, session_id=session_id,
         )
     return result
 

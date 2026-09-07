@@ -13,6 +13,7 @@ Hermes OpenAI contract). `stream=false` only.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -32,6 +33,21 @@ from config import Config
 from storage.database import Database
 
 logger = logging.getLogger(__name__)
+
+
+def _thread_session_id(messages: list[dict]) -> str:
+    """A stable OpenCode session id for the conversation thread.
+
+    Derives from the first user message so every request of a thread shares
+    one id (OpenCode Zen routes/caches on it); new threads get new ids.
+    """
+    for m in messages:
+        if m.get("role") == "user":
+            content = m.get("content")
+            if isinstance(content, str) and content.strip():
+                digest = hashlib.sha256(content.encode()).hexdigest()
+                return f"sb-{digest[:40]}"
+    return "sb-pool"
 
 DEFAULT_HOST = os.getenv("MODEL_PROXY_HOST", "127.0.0.1")
 DEFAULT_PORT = int(os.getenv("MODEL_PROXY_PORT", "18080"))
@@ -309,6 +325,7 @@ class OpenAICompatProxy:
         """
         assert self._health is not None and self._usage is not None
         messages = build_context(messages, system_instruction)
+        session_id = _thread_session_id(messages)
         prompt_bytes = estimate_prompt_bytes(messages, system_instruction)
         exclude: set[str] = set()
         last_error: Exception | None = None
@@ -326,6 +343,7 @@ class OpenAICompatProxy:
                         max_tokens=max_tokens,
                         tools=tools,
                         tool_choice=tool_choice,
+                        session_id=session_id,
                     )
                     est_out = max(1, len(result.text) // 4)
                     await self._usage.record_call(cand.id, prompt_bytes, est_out)

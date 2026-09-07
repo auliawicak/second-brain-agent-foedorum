@@ -103,6 +103,34 @@ async def test_chat_adapter_forwards_tools_and_returns_tool_calls(monkeypatch) -
 
 
 @pytest.mark.asyncio
+async def test_zen_calls_carry_x_opencode_session(monkeypatch) -> None:
+    from agent.providers import _call_chat
+    from agent.registry import ModelSpec
+
+    spec = ModelSpec(
+        id="muse-spark-1.3-contributor-free", provider="zen",
+        base_url="https://opencode.ai/zen/v1", api_style="chat_completions",
+        api_key_env="OPENCODE_ZEN_API_KEY", tiers=frozenset({"chat"}), priority=0,
+    )
+    fake = FakeClient({"choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}}]})
+    monkeypatch.setattr("agent.providers.shared_client", lambda: fake)
+
+    await _call_chat(spec, [{"role": "user", "content": "hi"}], "be terse",
+                     temperature=0.2, max_tokens=8, session_id="sb-abc")
+    assert fake.sent is not None
+    headers = fake.sent["headers"]
+    assert headers["x-opencode-session"] == "sb-abc"
+
+    # A stable fallback keeps the free tier happy even if no session is passed.
+    fake2 = FakeClient({"choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}}]})
+    monkeypatch.setattr("agent.providers.shared_client", lambda: fake2)
+    await _call_chat(spec, [{"role": "user", "content": "hi"}], "be terse",
+                     temperature=0.2, max_tokens=8)
+    assert fake2.sent is not None
+    assert fake2.sent["headers"]["x-opencode-session"] == "secondbrain-proxy"
+
+
+@pytest.mark.asyncio
 async def test_responses_adapter_returns_function_calls(monkeypatch) -> None:
     from agent.providers import _extract_responses_items
 

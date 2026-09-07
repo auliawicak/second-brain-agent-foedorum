@@ -193,6 +193,65 @@ class TestHttpEndpoints:
         assert resp.json()["error"]["type"] == "pool_error"
 
 
+class TestPoolSessionId:
+    def test_stable_per_thread_and_unique_across_threads(self) -> None:
+        from gateway.openai_proxy import _thread_session_id
+
+        thread_a = [
+            {"role": "user", "content": "What is on my agenda?"},
+            {"role": "assistant", "content": "Two items."},
+            {"role": "user", "content": "Now add a third."},
+        ]
+        thread_b = [
+            {"role": "user", "content": "What is on my agenda?"},
+            {"role": "user", "content": "Different follow-up."},
+        ]
+        same = _thread_session_id(thread_a)
+        assert same == _thread_session_id(thread_b)  # leading user msg identical
+        assert same.startswith("sb-")
+        assert _thread_session_id(
+            [{"role": "user", "content": "Something else entirely"}]
+        ) != same
+
+    async def test_session_id_reaches_call_model(
+        self, pool_db: Database, monkeypatch
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        async def fake_call_model(spec, messages, system_instruction, **kwargs):
+            captured["session_id"] = kwargs.get("session_id")
+            captured["messages"] = messages
+            return SimpleNamespace(
+                text="x", tool_calls=None, finish_reason="stop", usage=None
+            )
+
+        async def fake_route(tier, health, usage, exclude):
+            return [SimpleNamespace(
+                id="muse-zen", provider="zen", base_url="http://x",
+                api_style="chat_completions", api_key_env="X",
+                max_output_tokens=256, priority=0,
+            )]
+
+        monkeypatch.setattr("gateway.openai_proxy.call_model", fake_call_model)
+        monkeypatch.setattr("gateway.openai_proxy.route", fake_route)
+
+        proxy = OpenAICompatProxy(host="127.0.0.1", port=0, tier="chat")
+        proxy._health = ModelHealth(pool_db)
+        proxy._usage = UsageTracker(pool_db)
+
+        history = [{"role": "user", "content": "stable opener"}]
+        await proxy._generate_pool(
+            list(history), system_instruction="sys", temperature=0.2
+        )
+        first = captured["session_id"]
+        assert first and first.startswith("sb-")
+        await proxy._generate_pool(
+            list(history) + [{"role": "assistant", "content": "hi"}],
+            system_instruction="sys", temperature=0.2,
+        )
+        assert captured["session_id"] == first  # thread-stable across turns
+
+
 class TestPromptCap:
     async def test_oversized_history_trimmed(self, pool_db: Database, monkeypatch) -> None:
         captured: dict[str, Any] = {}
