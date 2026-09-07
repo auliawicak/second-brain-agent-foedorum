@@ -155,14 +155,16 @@ def test_responses_tool_conversion() -> None:
              "tool_calls": [{"id": "call_1", "type": "function",
                              "function": {"name": "math_add", "arguments": '{"a":2,"b":2}'}}]},
             {"role": "tool", "content": "4", "tool_call_id": "call_1"},
+            {"role": "assistant", "content": "The result is 4."},
         ]
     )
     assert converted[0] == {"role": "user", "content": [{"type": "input_text", "text": "compute"}]}
     assert converted[1]["output"][0]["type"] == "function_call"
     assert converted[1]["output"][0]["call_id"] == "call_1"
     assert converted[1]["output"][0]["arguments"] == '{"a":2,"b":2}'
-    assert converted[2] == {"role": "tool", "call_id": "call_1",
-                            "content": [{"type": "input_text", "text": "4"}]}
+    assert converted[2] == {"role": "tool", "call_id": "call_1", "content": "4"}
+    assert converted[3] == {"role": "assistant",
+                            "content": [{"type": "output_text", "text": "The result is 4."}]}
 
 
 @pytest.mark.asyncio

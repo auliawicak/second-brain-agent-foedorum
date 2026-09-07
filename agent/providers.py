@@ -230,7 +230,15 @@ def _to_responses_messages(messages: list[dict]) -> list[dict]:
         content = m.get("content")
         item: dict[str, Any] = {"role": role}
         if isinstance(content, str) and content:
-            item["content"] = [{"type": "input_text", "text": content}]
+            # Zen is picky about which content part type each role accepts:
+            # users get input_text, assistants get output_text, tools take a
+            # plain string.
+            if role == "assistant":
+                item["content"] = [{"type": "output_text", "text": content}]
+            elif role == "tool":
+                item["content"] = content
+            else:
+                item["content"] = [{"type": "input_text", "text": content}]
         elif content is not None:
             item["content"] = content
         if role == "assistant" and m.get("tool_calls"):
