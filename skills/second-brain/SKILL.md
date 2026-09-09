@@ -33,9 +33,13 @@ yourself, e.g. `2026-09-08T09:00:00`.
 | List tasks | `tasks list --status pending` (or `all`, `in_progress`, `done`) |
 | Today's agenda | `tasks agenda` (or `agenda`) |
 | Complete tasks | `tasks complete 1 2 7` — batch them into ONE call |
+| Edit task | `tasks update <id> --title "..." [--priority high] [--due 2026-09-10] [--category work] [--status in_progress]` (pass `--due ""` to clear) |
+| Delete task | `tasks delete <id>` |
 | Save note | `notes add "content" --tags '["idea","proj"]' --category research` |
 | Search notes | `notes search "keyword"` |
 | Recent notes | `notes recent 5` |
+| Edit note | `notes update <id> --content "..." [--tags '["a","b"]'] [--category research]` |
+| Delete note | `notes delete <id>` |
 | Set reminder | `reminders set "Water the plants" --time 2026-09-08T09:00:00` |
 | Recurring reminder | `reminders set "Morning standup" --time 2026-09-08T09:00:00 --cron "0 9 * * 1-5"` |
 | List reminders | `reminders list` (add `--all` to include inactive) |
@@ -49,10 +53,10 @@ yourself, e.g. `2026-09-08T09:00:00`.
 
 1. **Never claim an action happened without seeing the CLI output.** If the
    command errors, report the error and fall back to reading the data.
-2. **Confirm before mutating.** For task completion, reminder changes, note
-   deletes, or persona edits: run the read command, show the user exactly what
-   will change, and wait for their go-ahead (their confirmations may arrive
-   delayed — never assume).
+2. **Confirm before mutating.** For task completion, task/note edits,
+   deletes, reminder changes, or persona edits: run the read command, show the
+   user exactly what will change, and wait for their go-ahead (their
+   confirmations may arrive delayed — never assume).
 3. **Definitive Yes/No answers.** When asked "do I still have my X reminder?"
    run `reminders list` and answer bluntly YES or NO with the details. Do not
    hedge.
