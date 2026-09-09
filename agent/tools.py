@@ -132,6 +132,68 @@ async def complete_tasks(task_ids: list) -> str:
     return "\n".join(lines)
 
 
+async def update_task(
+    task_id,
+    *,
+    description: str | None = None,
+    priority: str | None = None,
+    due_date: str | None = None,
+    category: str | None = None,
+    status: str | None = None,
+) -> str:
+    """Update a task's fields in place. Provide only the fields to change.
+
+    Args:
+        task_id: The numeric ID of the task (accepts int or '#id' string).
+        description: New description.
+        priority: Priority level — 'low', 'medium', 'high', or 'urgent'.
+        due_date: New due date in YYYY-MM-DD (or '' to clear it).
+        category: New category.
+        status: New status — 'pending', 'in_progress', 'done', or 'archived'.
+    """
+    db = _get_db()
+    try:
+        tid = int(str(task_id).strip().lstrip("#"))
+    except (TypeError, ValueError):
+        return "❌ Invalid task ID."
+    try:
+        priority_value = TaskPriority(priority).value if priority else None
+    except ValueError:
+        return f"❌ Invalid priority '{priority}' (choose low, medium, high, urgent)."
+    try:
+        status_value = TaskStatus(status).value if status else None
+    except ValueError:
+        return f"❌ Invalid status '{status}' (choose pending, in_progress, done, archived)."
+    task = await db.update_task(
+        tid,
+        description=description,
+        priority=priority_value,
+        due_date=due_date,
+        category=category,
+        status=status_value,
+    )
+    if not task:
+        return f"❌ Task #{tid} not found."
+    return f"✏️ Task #{task.id} updated: {task.description} [{task.priority.value}]"
+
+
+async def delete_task(task_id) -> str:
+    """Delete a task entirely.
+
+    Args:
+        task_id: The numeric ID of the task (accepts int or '#id' string).
+    """
+    db = _get_db()
+    try:
+        tid = int(str(task_id).strip().lstrip("#"))
+    except (TypeError, ValueError):
+        return "❌ Invalid task ID."
+    deleted = await db.delete_task(tid)
+    if not deleted:
+        return f"❌ Task #{tid} not found."
+    return f"🗑️ Task #{tid} deleted."
+
+
 async def get_today_agenda() -> str:
     """Get today's agenda: pending tasks, due items, and active reminders."""
     db = _get_db()
@@ -225,6 +287,54 @@ async def get_recent_notes(limit: int = 10) -> str:
         if tag_str:
             lines.append(f"   Tags: {tag_str}")
     return "\n".join(lines)
+
+
+async def update_note(
+    note_id,
+    *,
+    content: str | None = None,
+    tags: list | None = None,
+    category: str | None = None,
+) -> str:
+    """Update a note's fields in place. Provide only the fields to change.
+
+    Args:
+        note_id: The numeric ID of the note.
+        content: New note content.
+        tags: New tag list (replaces existing).
+        category: New category.
+    """
+    db = _get_db()
+    try:
+        nid = int(str(note_id).strip().lstrip("#"))
+    except (TypeError, ValueError):
+        return "❌ Invalid note ID."
+    note = await db.update_note(
+        nid,
+        content=content,
+        tags=list(tags) if tags is not None else None,
+        category=category,
+    )
+    if not note:
+        return f"❌ Note #{nid} not found."
+    return f"✏️ Note #{note.id} updated: {note.content[:120]}{'...' if len(note.content) > 120 else ''}"
+
+
+async def delete_note(note_id) -> str:
+    """Delete a note entirely.
+
+    Args:
+        note_id: The numeric ID of the note.
+    """
+    db = _get_db()
+    try:
+        nid = int(str(note_id).strip().lstrip("#"))
+    except (TypeError, ValueError):
+        return "❌ Invalid note ID."
+    deleted = await db.delete_note(nid)
+    if not deleted:
+        return f"❌ Note #{nid} not found."
+    return f"🗑️ Note #{nid} deleted."
 
 
 # ─── Reminder Tools ──────────────────────────────────────────────────────────

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 from datetime import timedelta
 
@@ -47,6 +48,15 @@ def _build_parser() -> argparse.ArgumentParser:
     lst.add_argument("--date", default=None)
     comp = tasks_sub.add_parser("complete", help="Complete one or more tasks")
     comp.add_argument("ids", nargs="+")
+    up = tasks_sub.add_parser("update", help="Update a task's fields in place")
+    up.add_argument("id")
+    up.add_argument("--title", dest="description", default=None)
+    up.add_argument("--priority", default=None)
+    up.add_argument("--due", dest="due_date", default=None)
+    up.add_argument("--category", default=None)
+    up.add_argument("--status", default=None)
+    dlt = tasks_sub.add_parser("delete", help="Delete a task entirely")
+    dlt.add_argument("id")
     tasks_sub.add_parser("day-stats", help="Created vs completed today")
 
     notes = sub.add_parser("notes", help="Note operations")
@@ -59,6 +69,13 @@ def _build_parser() -> argparse.ArgumentParser:
     search.add_argument("query")
     recent = notes_sub.add_parser("recent", help="Most recent notes")
     recent.add_argument("limit", nargs="?", type=int, default=10)
+    nup = notes_sub.add_parser("update", help="Update a note's fields in place")
+    nup.add_argument("id")
+    nup.add_argument("--content", default=None)
+    nup.add_argument("--tags", default=None)
+    nup.add_argument("--category", default=None)
+    ndlt = notes_sub.add_parser("delete", help="Delete a note entirely")
+    ndlt.add_argument("id")
 
     reminders = sub.add_parser("reminders", help="Reminder operations")
     reminders_sub = reminders.add_subparsers(dest="action", required=True)
@@ -125,7 +142,7 @@ async def _run(command: str, args: argparse.Namespace) -> str:
         if command == "tasks":
             return await _tasks(args, db)
         if command == "notes":
-            return await _notes(args)
+            return await _notes(args, db)
         if command == "reminders":
             return await _reminders(args)
         if command == "prefs":
@@ -170,6 +187,21 @@ async def _tasks(args: argparse.Namespace, db: Database) -> str:
         )
     if action == "complete":
         return await tools.complete_tasks(getattr(args, "ids", []))
+    if action == "update":
+        kwargs = {}
+        for field, attr in (
+            ("description", "description"),
+            ("priority", "priority"),
+            ("due_date", "due_date"),
+            ("category", "category"),
+            ("status", "status"),
+        ):
+            value = getattr(args, attr, None)
+            if value is not None:
+                kwargs[field] = value
+        return await tools.update_task(args.id, **kwargs)
+    if action == "delete":
+        return await tools.delete_task(args.id)
     if action == "day-stats":
         from datetime import datetime as dt
 
@@ -183,7 +215,7 @@ async def _tasks(args: argparse.Namespace, db: Database) -> str:
     return "Unknown tasks action"
 
 
-async def _notes(args: argparse.Namespace) -> str:
+async def _notes(args: argparse.Namespace, db: Database) -> str:
     action = getattr(args, "action", "")
     if action == "add":
         return await tools.save_note(
@@ -195,6 +227,20 @@ async def _notes(args: argparse.Namespace) -> str:
         return await tools.search_notes(args.query)
     if action == "recent":
         return await tools.get_recent_notes(getattr(args, "limit", 10))
+    if action == "update":
+        kwargs = {}
+        content = getattr(args, "content", None)
+        tags = getattr(args, "tags", None)
+        category = getattr(args, "category", None)
+        if content is not None:
+            kwargs["content"] = content
+        if tags is not None:
+            kwargs["tags"] = json.loads(tags)
+        if category is not None:
+            kwargs["category"] = category
+        return await tools.update_note(args.id, **kwargs)
+    if action == "delete":
+        return await tools.delete_note(args.id)
     return "Unknown notes action"
 
 

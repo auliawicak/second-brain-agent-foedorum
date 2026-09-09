@@ -263,6 +263,47 @@ class Database:
         row = await cursor.fetchone()
         return Task(**dict(row)) if row else None
 
+    async def update_task(
+        self,
+        task_id: int,
+        *,
+        description: str | None = None,
+        priority: str | None = None,
+        due_date: str | None = None,
+        category: str | None = None,
+        status: str | None = None,
+    ) -> Task | None:
+        """Update a task's fields in place. Only provided fields change.
+
+        Returns the refreshed task, or None if the task does not exist.
+        """
+        updates: list[str] = []
+        params: list = []
+        if description is not None:
+            updates.append("description = ?")
+            params.append(description)
+        if priority is not None:
+            updates.append("priority = ?")
+            params.append(priority)
+        if due_date is not None:
+            updates.append("due_date = ?")
+            params.append(due_date if due_date else None)
+        if category is not None:
+            updates.append("category = ?")
+            params.append(category)
+        if status is not None:
+            updates.append("status = ?")
+            params.append(status)
+        if updates:
+            params.append(task_id)
+            await self.db.execute(
+                f"UPDATE tasks SET {', '.join(updates)} WHERE id = ?", params
+            )
+            await self.db.commit()
+        cursor = await self.db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
+        row = await cursor.fetchone()
+        return Task(**dict(row)) if row else None
+
     async def delete_task(self, task_id: int) -> bool:
         """Delete a task by ID."""
         cursor = await self.db.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
@@ -330,6 +371,50 @@ class Database:
             data["tags"] = json.loads(data["tags"]) if isinstance(data["tags"], str) else data["tags"]
             results.append(Note(**data))
         return results
+
+    async def update_note(
+        self,
+        note_id: int,
+        *,
+        content: str | None = None,
+        tags: list[str] | None = None,
+        category: str | None = None,
+    ) -> Note | None:
+        """Update a note's fields in place. Only provided fields change.
+
+        The notes_au FTS trigger keeps full-text search in sync on UPDATE.
+        Returns the refreshed note, or None if it does not exist.
+        """
+        updates: list[str] = []
+        params: list = []
+        if content is not None:
+            updates.append("content = ?")
+            params.append(content)
+        if tags is not None:
+            updates.append("tags = ?")
+            params.append(json.dumps(tags))
+        if category is not None:
+            updates.append("category = ?")
+            params.append(category)
+        if updates:
+            params.append(note_id)
+            await self.db.execute(
+                f"UPDATE notes SET {', '.join(updates)} WHERE id = ?", params
+            )
+            await self.db.commit()
+        cursor = await self.db.execute("SELECT * FROM notes WHERE id = ?", (note_id,))
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        data = dict(row)
+        data["tags"] = json.loads(data["tags"]) if isinstance(data["tags"], str) else data["tags"]
+        return Note(**data)
+
+    async def delete_note(self, note_id: int) -> bool:
+        """Delete a note by ID."""
+        cursor = await self.db.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+        await self.db.commit()
+        return cursor.rowcount > 0
 
     # ─── Reminders ────────────────────────────────────────────────────────
 
