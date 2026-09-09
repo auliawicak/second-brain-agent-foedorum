@@ -220,27 +220,59 @@ def _to_responses_tool_choice(choice: Any) -> Any:
 def _to_responses_messages(messages: list[dict]) -> list[dict]:
     """Chat-completions message history → Responses-API input.
 
-    Converts assistant `tool_calls` into the Responses `output` function_call
-    items and tool results into `role: tool` messages with a `call_id`, so
-    multi-turn tool loops survive the relay.
+    Zen's free "Console" route refuses to resolve any `function_call_output`
+    relay (no shape or session-id variant works), so tool results are FOLDED
+    into plain user text instead of being sent back as typed items. The
+    assistant `function_call` items stay in history as `output`; each tool
+    result that follows becomes content on a user message. This keeps the
+    tool loop alive without ever asking the provider to match a call id.
+
+    Assistant items always carry `content` (a list, possibly empty), because
+    Zen rejects assistant items missing that key. Consecutive tool results
+    are merged into one synthetic user message.
     """
     out: list[dict] = []
+    pending_tool_text: list[str] = []
+
+    def _flush_tool_results() -> None:
+        if not pending_tool_text:
+            return
+        out.append(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Tool result:\n" + "\n\n".join(pending_tool_text),
+                    }
+                ],
+            }
+        )
+        pending_tool_text.clear()
+
     for m in messages:
         role = m.get("role", "user")
         content = m.get("content")
+        if role == "tool":
+            text = content if isinstance(content, str) else json.dumps(content)
+            pending_tool_text.append(text)
+            continue
+
+        _flush_tool_results()
+
         item: dict[str, Any] = {"role": role}
         if isinstance(content, str) and content:
-            # Zen is picky about which content part type each role accepts:
-            # users get input_text, assistants get output_text, tools take a
-            # plain string.
-            if role == "assistant":
-                item["content"] = [{"type": "output_text", "text": content}]
-            elif role == "tool":
-                item["content"] = content
-            else:
-                item["content"] = [{"type": "input_text", "text": content}]
-        elif content is not None:
+            part_type = "output_text" if role == "assistant" else "input_text"
+            item["content"] = [{"type": part_type, "text": content}]
+        elif isinstance(content, list):
             item["content"] = content
+        elif role == "assistant":
+            item["content"] = []
+        elif content is not None:
+            item["content"] = [{"type": "input_text", "text": str(content)}]
+        else:
+            item["content"] = [{"type": "input_text", "text": ""}]
+
         if role == "assistant" and m.get("tool_calls"):
             output = []
             for tc in m["tool_calls"]:
@@ -259,9 +291,9 @@ def _to_responses_messages(messages: list[dict]) -> list[dict]:
                 )
             if output:
                 item["output"] = output
-        if role == "tool":
-            item["call_id"] = m.get("tool_call_id") or f"call_{uuid4().hex[:12]}"
         out.append(item)
+
+    _flush_tool_results()
     return out
 
 
