@@ -1,0 +1,18 @@
+[Unit]
+Description=Second Brain read-only dashboard (localhost only)
+After=network.target
+
+[Service]
+Type=simple
+User=auliawicaksono
+WorkingDirectory=/opt/second-brain
+EnvironmentFile=/opt/second-brain/.env
+ExecStart=/usr/bin/python3 /opt/second-brain/services/dashboard.py --port 8765
+Restart=on-failure
+RestartSec=5
+# Reachable only through SSH tunnel; token auth on top.
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

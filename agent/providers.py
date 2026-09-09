@@ -122,6 +122,10 @@ async def _call_responses(spec: ModelSpec, messages: list[dict], system_instruct
     }
     if not payload.get("instructions"):
         payload.pop("instructions")
+    if _messages_contain_image(messages):
+        # Reasoning models burn output budget silently on image turns; a low
+        # effort makes them actually answer (verified with muse on free tier).
+        payload["reasoning"] = {"effort": "minimal"}
     converted_tools = _to_responses_tools(tools)
     if converted_tools:
         payload["tools"] = converted_tools
@@ -217,6 +221,43 @@ def _to_responses_tool_choice(choice: Any) -> Any:
     return choice
 
 
+def _to_responses_content(content: list[dict]) -> list[dict]:
+    """Chat-completions content part list → Responses-API part list.
+
+    Text parts become `input_text`, image parts become `input_image` (muse
+    accepts data-URI image_url on the free tier), everything else is kept
+    as-is so unknown/native parts pass through untouched.
+    """
+    parts: list[dict] = []
+    for part in content or []:
+        if not isinstance(part, dict):
+            continue
+        ptype = part.get("type")
+        if ptype in ("text", "input_text"):
+            parts.append(
+                {"type": "input_text", "text": part.get("text", "")}
+            )
+        elif ptype == "image_url":
+            img = part.get("image_url") or {}
+            url = img if isinstance(img, str) else img.get("url", "")
+            item: dict[str, Any] = {"type": "input_image", "image_url": url}
+            if isinstance(img, dict) and img.get("detail"):
+                item["detail"] = img["detail"]
+            parts.append(item)
+        else:
+            parts.append(part)
+    return parts
+
+
+def _messages_contain_image(messages: list[dict]) -> bool:
+    for m in messages:
+        content = m.get("content")
+        for part in content or []:
+            if isinstance(part, dict) and part.get("type") == "image_url":
+                return True
+    return False
+
+
 def _to_responses_messages(messages: list[dict]) -> list[dict]:
     """Chat-completions message history → Responses-API input.
 
@@ -265,7 +306,7 @@ def _to_responses_messages(messages: list[dict]) -> list[dict]:
             part_type = "output_text" if role == "assistant" else "input_text"
             item["content"] = [{"type": part_type, "text": content}]
         elif isinstance(content, list):
-            item["content"] = content
+            item["content"] = _to_responses_content(content)
         elif role == "assistant":
             item["content"] = []
         elif content is not None:
