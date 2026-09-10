@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import gzip
 import logging
+import os
 import re
 import shutil
 import sqlite3
@@ -396,9 +397,20 @@ async def _export_consolidation_log(db: Database, base: Path) -> dict:
 
 def _gcloud_binary() -> str:
     gcloud = shutil.which("gcloud")
-    if not gcloud:
-        raise RuntimeError("gcloud CLI not found on PATH — cannot run backup job.")
-    return gcloud
+    if gcloud:
+        return gcloud
+    # Fallback to known install locations (cron workers often run with a stripped PATH).
+    for cand in (
+        "/snap/bin/gcloud",
+        "/usr/local/bin/gcloud",
+        "/usr/bin/gcloud",
+        "/opt/google-cloud-sdk/bin/gcloud",
+        os.path.expanduser("~/google-cloud-sdk/bin/gcloud"),
+        os.path.expanduser("~/bin/gcloud"),
+    ):
+        if os.path.exists(cand):
+            return cand
+    raise RuntimeError("gcloud CLI not found on PATH — cannot run backup job.")
 
 
 def _hot_copy_db(src_path: Path, dst_path: Path) -> None:
