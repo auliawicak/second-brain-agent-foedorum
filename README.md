@@ -86,7 +86,7 @@ Telegram ─► hermes-gateway (user systemd unit)
 - Pool model: `secondbrain-pool` → Zen **Responses** API. `chat/completions` on Zen returns HTTP 500 for these models, so the proxy translates.
 - **Text-fold**: Zen free rejects `function_call_output`, so Hermes' native tool-result envelope can't cross. The proxy folds tool results into synthetic user `<tool_result>` text and the assistant always carries a `content` list. This is why image tool-results also can't pass natively.
 - **Vision (images)**: pool vision relay supports `input_image`; free model tested: **`muse-spark-1.3-contributor-free`** ("The image is solid blue" — correct). Hermes `auxiliary.vision` → `custom` provider → pool → description injected as text. (Other free models 500 on images.)
-- **Voice (STT)**: free **local** Whisper via `faster-whisper` (`base`, CPU int8) installed in the Hermes venv; `stt.provider=local`. Measured: model load ~11s, 6s clip transcribed in ~7s, exact transcript. Cloud fallbacks (Groq `whisper-large-v3-turbo`, etc.) supported if a key is added.
+- **Voice (STT)**: **Groq Whisper** (`whisper-large-v3-turbo`) as the primary provider — free tier (2,000 req/day, 28.8k audio-sec/day), key `GROQ_API_KEY` in both `.env` files; `stt.provider: groq`. Local **`faster-whisper`** (`base`, CPU int8) stays installed as the passive fallback when the cloud key is unavailable.
 
 ## Scheduled Jobs
 
@@ -191,7 +191,7 @@ gcloud compute ssh second-brain-agent --zone=us-central1-a -- tail -50 ~/.hermes
 4. **Hermes** (`~/.hermes/config.yaml`): `model.default: secondbrain-pool`, `provider: custom`, `base_url: http://127.0.0.1:18080`, `max_tokens: 4096`, `context_length: 128000`; `stt.enabled: true`, `stt.local.model: base`; `auxiliary.vision: {provider: custom, model: secondbrain-pool}`.
 5. **Skill**: copy `skills/second-brain/SKILL.md` → `~/.hermes/skills/second-brain/SKILL.md`.
 6. **Cron**: recreate the 8 jobs from the table (`hermes cron`); script jobs reference `~/.hermes/scripts/secondbrain/{reminders,conditions,maintenance}.sh`.
-7. **STT**: `faster-whisper` installed in the Hermes venv (pip bootstrapped into the venv).
+7. **STT**: `stt.provider: groq` (primary, `whisper-large-v3-turbo`); `GROQ_API_KEY` in `.env`; `faster-whisper` installed in the Hermes venv as local fallback.
 8. **Backups**: set `BACKUP_BUCKET`, grant the compute SA bucket `roles/storage.objectAdmin`, add a 60-day lifecycle rule.
 9. **Dashboard**: `DASHBOARD_TOKEN` in `.env`; enable `secondbrain-dashboard.service`.
 
@@ -217,7 +217,7 @@ gcloud compute ssh second-brain-agent --zone=us-central1-a -- tail -50 ~/.hermes
 | Hero model 500s / empty outputs | Zen free tier: proxy must use Responses API + `x-opencode-session`; check `gateway/openai_proxy.py` and `model-proxy.service`. |
 | Tool results missing on the free tier | Text-fold path required; do not switch Hermes back to native tool-result relay. |
 | Images don't reach the model | Aux vision (custom provider → pool) required; native image tool-results are folded/destroyed by text-fold. |
-| Voice notes fail | Is `faster-whisper` importable in the Hermes venv? `stt.provider: local`, `stt.local.model: base`. Restart `hermes-gateway` after installing. |
+| Voice notes fail | Check `GROQ_API_KEY` in both `.env` files and `stt.provider: groq` (fallback: `faster-whisper` importable in the Hermes venv, `stt.local.model: base`). Restart `hermes-gateway` after changing either. |
 | Dashboard 401 | Wrong/missing `DASHBOARD_TOKEN`. |
 | No backups | Check `BACKUP_BUCKET`, SA `roles/storage.objectAdmin`, and `maintenance.sh` output. |
 
@@ -232,7 +232,7 @@ gcloud compute ssh second-brain-agent --zone=us-central1-a -- tail -50 ~/.hermes
 - [x] 8 Hermes cron jobs live and verified end-to-end (real delivery receipts)
 - [ ] Multi-provider GA (add a second provider key — Groq/Gemini — to reach the ≥3-provider bar in `docs/model_matrix.md`)
 - [ ] Webhook mode for non-VM hosts (optional; polling needs no inbound port)
-- [ ] Voice-note cloud STT fallback (set `GROQ_API_KEY`; free tier)
+- [x] Voice-note STT via Groq Whisper free tier (`whisper-large-v3-turbo`, local fallback)
 
 ## Legacy note
 

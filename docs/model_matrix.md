@@ -38,8 +38,8 @@ superseded by Hermes; the CI-evidence rows above are retained for the record.
 |---|---|---|
 | Image (tool) | pool `/v1/chat/completions` with `image_url` data-URI → muse | "The image is solid blue." (correct) |
 | Image (agent) | Hermes `auxiliary.vision` → custom provider → pool | vision tool returned the same description |
-| Voice | `faster-whisper` base (CPU int8) in the Hermes venv | load ~11s, 7s to transcribe a 6s clip, exact transcript |
-| Voice (cloud alt) | Groq `whisper-large-v3-turbo` | available once `GROQ_API_KEY` is set |
+| Voice | Groq Whisper `whisper-large-v3-turbo` (free tier) | `{"success": true, "provider": "groq"}` — exact transcript |
+| Voice (local fallback) | `faster-whisper` base (CPU int8) in the Hermes venv | load ~11s, 7s to transcribe a 6s clip, exact transcript |
 
 Zen free models that 500 on images: `mimo-v2.5-free`, `ling-3.0-flash-fin-free`.
 
