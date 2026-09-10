@@ -36,6 +36,7 @@ It is built on **[opencode Hermes](https://opencode.ai)** (the messaging gateway
 
 1. **Hermes gateway** long-polls Telegram (outbound only; no webhook, no public port). Inbound text → agent turn; photos → aux vision; voice → local Whisper. It also runs the **8 cron jobs** below.
 2. The agent uses the **`second-brain` skill** (`skills/second-brain/SKILL.md`) which teaches it to run the `secondbrain` CLI for every read/write — it never invents data.
+3. A **health watchdog** (no-agent cron) runs every 10 minutes and stays silent while things are healthy; it messages Telegram only on sustained drift (pool down, gateway dead, stale heartbeat, model cooldown, disk/memory pressure) and once more when things recover.
 3. Every model call goes to the **model proxy** (`http://127.0.0.1:18080`, model id `secondbrain-pool`), a thin OpenAI-compatible `/v1/chat/completions` server that:
    - opens a **thread session** (`x-opencode-session`) and calls the **Zen Responses API**;
    - **folds tool results into user text** (free-tier quirk: `function_call_output` is rejected, so Hermes' native tool-result envelope can't pass through);
@@ -75,8 +76,8 @@ Telegram ─► hermes-gateway (user systemd unit)
 | `model-proxy.service` | `gateway/openai_proxy.py` — local OpenAI-compatible pool on `127.0.0.1:18080`, model id `secondbrain-pool`; the only model endpoint Hermes sees |
 | Model backend | **OpenCode Zen free tier** (Responses API): `FAST_MODEL` / `DEEP_MODEL` pinned to `muse-spark-1.3-contributor-free` (the only free model passing the golden tool-set, 93%) |
 | `secondbrain` CLI | `secondbrain/cli.py` + `agent/tools.py` — the agent's tool surface over SQLite |
-| Scheduler | Hermes cron (8 jobs) in `~/.hermes/hermes-agent` config; job logic + schedules mirrored in `services/scheduler.py` |
-| Scripted jobs | no-agent cron: `scripts/*.sh` → `reminders.sh`, `conditions.sh`, `maintenance.sh` |
+| Scheduler | Hermes cron (9 jobs, incl. 4 no-agent scripts) in `~/.hermes/hermes-agent` config; job logic + schedules mirrored in `services/scheduler.py` |
+| Scripted jobs | no-agent cron: `reminders.sh`, `conditions.sh`, `maintenance.sh`, `health_check.sh` (watchdog) |
 | Backup | Nightly `maintenance.sh` → `gs://secondbrain-507714-backups` (60-day lifecycle) |
 | Dashboard | `services/dashboard.py` — read-only, `127.0.0.1:8765`, bearer token, SSH tunnel (`scripts/dashboard-tunnel.sh`) |
 | Legacy bot | old `main.py`/`bot/` stack kept for reference; **`second-brain.service` must stay disabled** (same-token conflict with Hermes) |
@@ -102,6 +103,7 @@ Hermes cron (UTC; VM local time). Jakarta = UTC+7. Schedules mirrored in `servic
 | reminders-fire | `* * * * *` | every minute | script `secondbrain/reminders.sh` (no agent) |
 | conditions-check | `*/15 * * * *` | every 15 min | script `secondbrain/conditions.sh` (no agent) |
 | nightly-maintenance | 0 20 * * * | 03:00 | script `secondbrain/maintenance.sh` (no agent) |
+| health-check | `*/10 * * * *` | every 10 min | script `secondbrain/health_check.sh` (no agent, watchdog) |
 
 Deliveries go to `telegram:8481919074` (your allowlisted channel). Scripted jobs log `[SILENT] — skipping delivery` when there's nothing to say.
 
@@ -145,12 +147,13 @@ Read-only view of the DB (tasks, notes, reminders, preferences, model usage, dig
 ├── secondbrain/
 │   └── cli.py              # the CLI the agent actually calls (tasks/notes/reminders/prefs/facts/corrections/persona/news)
 ├── services/
-│   ├── scheduler.py        # mirror of the 8 Hermes cron jobs
+│   ├── scheduler.py        # mirror of the 9 Hermes cron jobs
+│   ├── health.py           # watchdog checks (gateway, pool, heartbeat, cooldowns, disk/mem)
 │   ├── dashboard.py        # read-only dashboard (127.0.0.1:8765)
 │   └── secondbrain-dashboard.service
 ├── scripts/
 │   ├── dashboard-tunnel.sh # SSH tunnel helper
-│   └── secondbrain/{reminders,conditions,maintenance}.sh   # no-agent cron scripts (deployed to ~/.hermes/scripts)
+│   └── secondbrain/{reminders,conditions,maintenance,health_check}.sh   # no-agent cron scripts (deployed to ~/.hermes/scripts)
 ├── skills/second-brain/SKILL.md   # agent skill (mirrored to ~/.hermes/skills/)
 ├── docs/model_matrix.md    # model pool test evidence
 └── deploy/                 # legacy VM deploy scripts
@@ -190,7 +193,7 @@ gcloud compute ssh second-brain-agent --zone=us-central1-a -- tail -50 ~/.hermes
    ```
 4. **Hermes** (`~/.hermes/config.yaml`): `model.default: secondbrain-pool`, `provider: custom`, `base_url: http://127.0.0.1:18080`, `max_tokens: 4096`, `context_length: 128000`; `stt.enabled: true`, `stt.local.model: base`; `auxiliary.vision: {provider: custom, model: secondbrain-pool}`.
 5. **Skill**: copy `skills/second-brain/SKILL.md` → `~/.hermes/skills/second-brain/SKILL.md`.
-6. **Cron**: recreate the 8 jobs from the table (`hermes cron`); script jobs reference `~/.hermes/scripts/secondbrain/{reminders,conditions,maintenance}.sh`.
+6. **Cron**: recreate the jobs from the table (`hermes cron`); script jobs reference `~/.hermes/scripts/secondbrain/{reminders,conditions,maintenance,health_check}.sh`.
 7. **STT**: `stt.provider: groq` (primary, `whisper-large-v3-turbo`); `GROQ_API_KEY` in `.env`; `faster-whisper` installed in the Hermes venv as local fallback.
 8. **Backups**: set `BACKUP_BUCKET`, grant the compute SA bucket `roles/storage.objectAdmin`, add a 60-day lifecycle rule.
 9. **Dashboard**: `DASHBOARD_TOKEN` in `.env`; enable `secondbrain-dashboard.service`.
@@ -198,7 +201,8 @@ gcloud compute ssh second-brain-agent --zone=us-central1-a -- tail -50 ~/.hermes
 ## Operations
 
 - **Update code**: commit on the VM (`cd /opt/second-brain && sudo git …`), restart affected services.
-- **Logs**: `~/.hermes/logs/{agent,gateway}.log`; delivery receipts (e.g. `Job '52009a987088': delivered to telegram:8481919074 … message_id=47`).
+- **Watchdog**: `health_check.sh` every 10 min (Hermes cron `4c087606322f`) alerts on sustained drift and on recovery; healthy runs stay silent.
+- **Logs**: `~/.hermes/logs/{agent,gateway}.log`; delivery receipts (e.g. `Job '52009a987088': delivered to telegram:8481919074 … message_id=47`). Log files are small and actively held open by Hermes — do not truncate them externally.
 - **e2-micro is burstable**: occasional slowdowns under load are expected, not a bug.
 - **Voice latency**: first transcription pays ~11s model load; subsequent ones reuse the cached singleton (idle-unloaded after a timeout).
 

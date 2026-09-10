@@ -117,6 +117,10 @@ def _build_parser() -> argparse.ArgumentParser:
     maintenance_sub = maintenance.add_subparsers(dest="action", required=True)
     maintenance_sub.add_parser("run", help="Retention + markdown export + backup")
 
+    health = sub.add_parser("health", help="Liveliness & failure checks")
+    health_sub = health.add_subparsers(dest="action", required=True)
+    health_sub.add_parser("check", help="Run checks; prints alerts only when degraded")
+
     sub.add_parser("news", help="Fetch raw news for curation")
     sub.add_parser("agenda", help="Today's agenda")
 
@@ -157,6 +161,8 @@ async def _run(command: str, args: argparse.Namespace) -> str:
             return await _conditions(args, db)
         if command == "maintenance":
             return await _maintenance(args, db)
+        if command == "health":
+            return await _health(args, db)
         if command == "news":
             return await tools.get_news()
         if command == "agenda":
@@ -342,6 +348,12 @@ async def _maintenance(args: argparse.Namespace, db: Database) -> str:
     elif result.get("uploaded"):
         out += f" Backup uploaded ({result.get('blob_name', '')})."
     return out
+
+
+async def _health(args: argparse.Namespace, db: Database) -> str:
+    from services.health import run_health_checks
+
+    return run_health_checks(await db.get_heartbeat())
 
 
 def _get_db() -> Database:
